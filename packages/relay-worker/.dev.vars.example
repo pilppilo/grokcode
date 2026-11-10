@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `wrangler dev`. .dev.vars is gitignored.
+# Generate tokens locally, for example: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+MCP_TOKEN=replace-with-mcp-client-token
+MACHINE_TOKENS={"laptop":"replace-with-a-long-machine-token"}

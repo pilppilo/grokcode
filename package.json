@@ -1,0 +1,23 @@
+{
+  "name": "grokcode",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Let a remote MCP client drive OpenCode on your own PCs.",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w grokcode-shared && npm run build -w grokcode-agent && npm run typecheck -w grokcode-relay",
+    "typecheck": "npm run typecheck -w grokcode-shared && npm run typecheck -w grokcode-agent && npm run typecheck -w grokcode-relay",
+    "test": "npm run build -w grokcode-shared && node --import tsx --test packages/shared/test/*.test.ts packages/agent/test/*.test.ts packages/relay-worker/test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
