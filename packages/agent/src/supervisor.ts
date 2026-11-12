@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import { OpenCodeError, detectOpenCode, type FetchLike, type OpenCodeAuth } from "grokcode-shared";
 
+import { killProcessTree } from "./ports.js";
 import { redactSecrets, scanServerPassword } from "./password.js";
 
 export function buildServeArgs(hostname: string, port: number): string[] {
@@ -34,13 +35,19 @@ export interface SuperviseOptions {
   probe: (password: string | undefined) => Promise<ProbeResult>;
   password?: string;
   signal?: AbortSignal;
+  /** Lifecycle lines (start failures, exits). */
   log?: (line: string) => void;
+  /** Child stdout and stderr, already redacted. Omitted output is ignored. */
+  output?: (line: string) => void;
+  /** Fired each time the child is up, including after a restart. */
+  onReady?: (info: { spawnPid: number | undefined }) => void | Promise<void>;
   readyTimeoutMs?: number;
   pollMs?: number;
 }
 
 export interface SupervisedProcess {
   password: () => string | undefined;
+  pid: () => number | undefined;
   stop: () => Promise<void>;
 }
 
@@ -65,22 +72,9 @@ export async function supervise(options: SuperviseOptions): Promise<SupervisedPr
     if (restartTimer) clearTimeout(restartTimer);
     wakeRestart?.();
     const current = child;
-    if (!current || current.killed || current.exitCode != null) return;
-    current.kill();
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        try {
-          if (current.exitCode == null) current.kill("SIGKILL");
-        } catch {
-          /* Windows may not support the signal. */
-        }
-        resolve();
-      }, 2000);
-      current.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
+    const pid = current?.pid;
+    if (!current || pid == null || current.exitCode != null) return;
+    await killProcessTree(pid);
   };
   options.signal?.addEventListener("abort", () => {
     void stop();
@@ -97,6 +91,7 @@ export async function supervise(options: SuperviseOptions): Promise<SupervisedPr
     const proc = spawn(options.command, options.args, {
       env,
       shell: options.shell ?? false,
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     child = proc;
@@ -110,7 +105,7 @@ export async function supervise(options: SuperviseOptions): Promise<SupervisedPr
         if (!line) continue;
         const found = scanServerPassword(line);
         if (found && !options.password) scraped = found;
-        log(redactSecrets(line));
+        options.output?.(redactSecrets(line));
       }
     };
     proc.stdout?.on("data", consume);
@@ -120,15 +115,35 @@ export async function supervise(options: SuperviseOptions): Promise<SupervisedPr
     });
   };
 
+  const publishReady = async () => {
+    try {
+      await options.onReady?.({ spawnPid: child?.pid });
+    } catch (err) {
+      log(`could not record the opencode pid: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const deadline = Date.now() + readyTimeoutMs;
   let delay = 200;
   while (!stopping) {
     if (!child || child.exitCode != null || child.signalCode != null) startChild();
     const state = await options.probe(knownPassword());
     if (state === "up") {
+      await publishReady();
       const keepAlive = async () => {
         while (!stopping) {
-          if (!child || child.exitCode != null || child.signalCode != null) startChild();
+          const dead = !child || child.exitCode != null || child.signalCode != null;
+          if (dead) {
+            startChild();
+            while (!stopping && child && child.exitCode == null && child.signalCode == null) {
+              const again = await options.probe(knownPassword());
+              if (again === "up") {
+                await publishReady();
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, pollMs));
+            }
+          }
           await new Promise<void>((resolve) => {
             wakeRestart = resolve;
             restartTimer = setTimeout(resolve, 1000);
@@ -136,7 +151,7 @@ export async function supervise(options: SuperviseOptions): Promise<SupervisedPr
         }
       };
       void keepAlive();
-      return { password: knownPassword, stop };
+      return { password: knownPassword, pid: () => child?.pid, stop };
     }
     if (state === "unauthorized" && knownPassword()) {
       await stop();
