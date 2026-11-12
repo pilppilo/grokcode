@@ -1,0 +1,25 @@
+# Placeholder Cloudflare config. Do not put real tokens, account ids, or
+# deployment hostnames in this file. Set secrets with wrangler:
+#   wrangler secret put MCP_TOKEN
+#   wrangler secret put MACHINE_TOKENS
+#
+# MACHINE_TOKENS is a JSON object, for example:
+#   {"laptop":"replace-with-a-long-random-token","desktop":"replace-with-another-long-token"}
+
+name = "grokcode-relay"
+main = "src/index.ts"
+compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "HUB", class_name = "RelayHubDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RelayHubDO"]
+
+[vars]
+# Non-secret. Real tokens are wrangler secrets, not vars.
+LOG_LEVEL = "info"

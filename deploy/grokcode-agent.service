@@ -1,0 +1,24 @@
+# User systemd unit. Copy to ~/.config/systemd/user/grokcode-agent.service
+# Tokens stay in the EnvironmentFile, which you create locally and do not commit.
+#
+#   mkdir -p ~/.config/grokcode ~/.config/systemd/user
+#   cp deploy/agent.example.env ~/.config/grokcode/agent.env   # then edit
+#   cp deploy/grokcode-agent.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now grokcode-agent
+#   loginctl enable-linger "$USER"    # keep it running without a login session
+
+[Unit]
+Description=Grokcode agent (OpenCode bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/grokcode/agent.env
+ExecStart=%h/.local/bin/grokcode-agent
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

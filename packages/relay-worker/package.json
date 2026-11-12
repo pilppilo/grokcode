@@ -1,0 +1,19 @@
+{
+  "name": "grokcode-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker and Durable Object that relays a remote MCP client to grokcode agents.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "grokcode-shared": "0.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251108.0",
+    "wrangler": "^4.28.0"
+  }
+}
