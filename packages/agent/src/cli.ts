@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
 
+import path from "node:path";
+
 import { HELP, loadConfig, parseListen, validateConfig, type AgentConfig } from "./config.js";
+import { ensureOpenCode } from "./ownership.js";
 import { runRelayConnection } from "./relay.js";
 import { listenDirect } from "./server.js";
-import { buildServeArgs, probeOpenCode, supervise } from "./supervisor.js";
+import { probeOpenCode } from "./supervisor.js";
 import {
   detectOpenCode,
   executeOp,
@@ -52,61 +55,47 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
     return 0;
   }
 
+  if (config.loadedFrom.length > 0) io.log(`Loaded config from ${config.loadedFrom.join(", ")}.`);
+  if (config.defaultModel) io.log(`Default model ${config.defaultModel}.`);
+  if (config.opencodeUrl && config.opencodeMode === "spawn") {
+    io.log("Ignoring --opencode-url because OpenCode mode is spawn.");
+  }
+
+  const attachUrl = config.opencodeMode === "spawn" ? undefined : config.opencodeUrl;
+  const endpoint = attachUrl
+    ? endpointOf(attachUrl, config.opencodeHostname, config.opencodePort)
+    : { host: config.opencodeHostname, port: config.opencodePort };
+  let ensured;
+  try {
+    ensured = await ensureOpenCode({
+      mode: config.opencodeMode,
+      ...(config.opencodeOnForeign ? { onForeign: config.opencodeOnForeign } : {}),
+      host: endpoint.host,
+      port: endpoint.port,
+      command: config.opencodeBin,
+      ...(config.password ? { password: config.password } : {}),
+      env,
+      signal,
+      verbose: config.verbose,
+      pidFile: path.join(config.configDir ?? ".grokcode", "opencode.pid"),
+      ...(attachUrl ? { attachUrl } : {}),
+      log: (line) => io.log(line),
+      deps: {
+        probe: (url, password) =>
+          probeOpenCode(url, { username: config.username, ...(password ? { password } : {}) }),
+      },
+    });
+  } catch (err) {
+    io.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+
   const auth: OpenCodeAuth = {
     username: config.username,
-    ...(config.password ? { password: config.password } : {}),
+    ...(ensured.password() ? { password: ensured.password() } : {}),
   };
-  const baseUrl = config.opencodeUrl ?? `http://${config.opencodeHostname}:${config.opencodePort}`;
-  let stopChild = async () => {};
-
-  if (!config.spawn) {
-    const state = await probeOpenCode(baseUrl, auth);
-    if (state === "down") {
-      io.error(`OpenCode is not reachable at ${baseUrl}. Start it, or drop --no-spawn so the agent can launch \`opencode serve\`.`);
-      return 1;
-    }
-    if (state === "unauthorized") {
-      io.error("OpenCode rejected the password. Set OPENCODE_PASSWORD (username is opencode).");
-      return 1;
-    }
-  } else {
-    const hostname = config.opencodeHostname;
-    const port = config.opencodePort;
-    if (!config.opencodeUrl) {
-      const existing = await probeOpenCode(baseUrl, auth);
-      if (existing === "unauthorized") {
-        io.error(`Something is already serving ${baseUrl} and rejected the password. Set OPENCODE_PASSWORD or change --opencode-port.`);
-        return 1;
-      }
-      if (existing === "up") {
-        io.log(`Attaching to OpenCode already running at ${baseUrl}.`);
-      } else {
-        io.log(`Starting opencode serve on ${baseUrl}.`);
-        try {
-          const supervised = await supervise({
-            command: config.opencodeBin,
-            args: buildServeArgs(hostname, port),
-            env,
-            shell: process.platform === "win32",
-            password: config.password,
-            signal,
-            log: (line) => {
-              if (config.verbose) io.log(line);
-            },
-            probe: (password) =>
-              probeOpenCode(baseUrl, { username: config.username, ...(password ? { password } : {}) }),
-          });
-          if (supervised.password() && !auth.password) auth.password = supervised.password();
-          stopChild = supervised.stop;
-        } catch (err) {
-          io.error(err instanceof Error ? err.message : String(err));
-          return 1;
-        }
-      }
-    } else {
-      io.log(`Spawning is ignored because --opencode-url is set (${baseUrl}). Use a separate \`opencode serve\` or omit the URL.`);
-    }
-  }
+  const baseUrl = ensured.baseUrl;
+  const stopChild = ensured.stop;
 
   let apiPromise: Promise<OpenCodeClient> | undefined;
   const getApi = () => {
@@ -121,7 +110,15 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
 
   const execute = async (op: string, params: unknown) => {
     const api = await getApi();
-    return executeOp({ api, allowDirs: config.allowDirs }, op, params);
+    return executeOp(
+      {
+        api,
+        allowDirs: config.allowDirs,
+        ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
+      },
+      op,
+      params,
+    );
   };
 
   const closers: Array<() => Promise<void>> = [stopChild];
@@ -134,6 +131,7 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
       mcpToken: config.mcpToken,
       allowDirs: config.allowDirs,
       maxSyncWaitMs: config.maxSyncWaitMs,
+      ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
       getApi,
     });
     io.log(`Direct MCP at ${listening.url}/mcp (Authorization: Bearer <mcp token>).`);
@@ -191,6 +189,18 @@ async function relayLoop(
     if (signal.aborted) break;
     await sleep(delay, signal);
     delay = Math.min(delay * 2, 30_000);
+  }
+}
+
+function endpointOf(url: string, fallbackHost: string, fallbackPort: number): { host: string; port: number } {
+  try {
+    const parsed = new URL(url);
+    return {
+      host: parsed.hostname || fallbackHost,
+      port: parsed.port ? Number(parsed.port) : fallbackPort,
+    };
+  } catch {
+    return { host: fallbackHost, port: fallbackPort };
   }
 }
 

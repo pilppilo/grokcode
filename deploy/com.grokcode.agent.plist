@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  LaunchAgent template. Copy to ~/Library/LaunchAgents/com.grokcode.agent.plist
-  and replace YOUR_HOME and the token values locally. Do not commit a filled-in copy.
+  LaunchAgent template. deploy/install-macos.sh rewrites YOUR_HOME and installs
+  this to ~/Library/LaunchAgents. Tokens stay in ~/.config/grokcode/agent.env.
+  The agent loads that file itself.
 
   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.grokcode.agent.plist
   launchctl enable gui/$UID/com.grokcode.agent
@@ -14,26 +15,20 @@
     <string>com.grokcode.agent</string>
     <key>ProgramArguments</key>
     <array>
-      <string>/usr/local/bin/grokcode-agent</string>
+      <string>YOUR_HOME/.local/bin/grokcode-agent</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>HOME</key>
+      <string>YOUR_HOME</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/grokcode-agent.log</string>
+    <string>YOUR_HOME/.config/grokcode/agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/grokcode-agent.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>GROKCODE_MACHINE_NAME</key>
-      <string>laptop</string>
-      <key>GROKCODE_RELAY_URL</key>
-      <string>wss://YOUR_WORKER.workers.dev/agent</string>
-      <key>GROKCODE_MACHINE_TOKEN</key>
-      <string>REPLACE_WITH_MACHINE_TOKEN</string>
-      <key>OPENCODE_PASSWORD</key>
-      <string>REPLACE_WITH_OPENCODE_PASSWORD</string>
-    </dict>
+    <string>YOUR_HOME/.config/grokcode/agent.err.log</string>
   </dict>
 </plist>

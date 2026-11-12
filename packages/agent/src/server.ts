@@ -22,6 +22,7 @@ export interface DirectServerOptions {
   home?: string;
   platform?: PathPlatform;
   maxSyncWaitMs?: number;
+  defaultModel?: string;
   getApi: () => Promise<OpenCodeClient>;
 }
 
@@ -122,6 +123,7 @@ export function createDirectBackend(options: DirectServerOptions): MachineBacken
           allowDirs: options.allowDirs,
           platform: options.platform ?? detectPlatform(),
           ...(options.home ? { home: options.home } : {}),
+          ...(options.defaultModel ? { defaultModel: options.defaultModel } : {}),
         },
         op,
         params,

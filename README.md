@@ -38,9 +38,9 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | Tool | What it does |
 | --- | --- |
 | `list_machines` | PCs currently connected. |
-| `server_info` | Health, API generation, version. |
+| `server_info` | Health, API generation, version, and the agent's default model (`null` when unset). |
 | `list_projects` / `list_sessions` | Projects and sessions. |
-| `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). |
+| `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). If `model` is omitted, the agent sends `GROKCODE_DEFAULT_MODEL` when that PC has one. |
 | `send_prompt` | Admit a prompt. `wait` defaults to **false**. `wait: true` polls until idle, a permission is pending, or ~20s. |
 | `wait_session` | Same poll, without sending another prompt. |
 | `get_session` / `get_messages` | Status (`idle`, `busy`, `retry`) and transcript text. |
@@ -63,6 +63,7 @@ This repository is public. Do not commit tokens, `.dev.vars`, real worker hostna
 * **MCP client token** (`MCP_TOKEN` on the Worker, `GROKCODE_MCP_TOKEN` on a direct agent). Grok Bot sends `Authorization: Bearer …`.
 * **Per-machine token** (`MACHINE_TOKENS` on the Worker, `GROKCODE_MACHINE_TOKEN` on that PC). The relay checks the bearer token against the name in `X-Grokcode-Machine`. One machine's token does not authenticate as another.
 * Tokens shorter than 16 characters are rejected. Comparisons are constant-time. Parse errors for `MACHINE_TOKENS` do not echo the secret.
+* The per-PC config file (`~/.config/grokcode/agent.env`, or `%USERPROFILE%\.config\grokcode\agent.env`) may hold the machine token and OpenCode password. Installers create it so only the current user can read it (`chmod 600` on macOS and Linux, a current-user ACL on Windows). A real environment variable overrides the file. Do not commit the file.
 * **Directory allowlist** (`--allow-dir` / `GROKCODE_ALLOW_DIRS`). When set, session create and any later call are refused unless that session's directory is the allowed directory or a child of it. Prefix tricks (`/src` vs `/src-evil`) do not pass. An empty allowlist means any absolute path.
 * Direct mode rejects browser `Origin` values that are not the request host or loopback, so a website cannot use DNS rebinding against the local port. The relay is bearer-authenticated and is not a cookie session.
 * Spawned `opencode serve` binds to `127.0.0.1` by default. The agent scrapes a generated password from stdout and does not log it.
@@ -109,6 +110,28 @@ npx wrangler dev
 
 `packages/relay-worker/wrangler.toml` has no account id. `nodejs_compat` is on because token comparison uses `node:crypto`.
 
+## Add a new PC
+
+Do this once per computer. Relay mode and direct/Tailscale mode stay independent: a PC can use either, or both, and neither mode calls the other.
+
+1. On the Cloudflare account, register a `workers.dev` subdomain before the first deploy (Workers & Pages → **Your subdomain**). Wrangler prompts for one if it is missing. The name is account-wide. Do not commit it.
+2. Generate a token on the new PC and add it to the `MACHINE_TOKENS` secret. `wrangler secret put` replaces the whole secret, so paste the JSON for every machine, not just the new one. Keep that JSON off this repo.
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+```bash
+cd packages/relay-worker
+# Example shape only. Include the existing machines and the new name.
+# {"laptop":"<existing-token>","desktop":"<new-token>"}
+npx wrangler secret put MACHINE_TOKENS
+```
+
+3. Install OpenCode, Node.js 20+, and git on the PC, then run that PC's installer below. Pass the same machine name you used as the JSON key. The installer writes the config, can set OpenCode's own default model, and registers a startup service. It does not print the token or the OpenCode password.
+
+OpenCode's built-in default is often a Google model. If that provider has no key, set `--model` / `-DefaultModel` to a model the PC can actually call, for example `opencode-go/deepseek-v4.1-flash`. `--set-opencode-model` / `-SetOpenCodeModel` writes that into `~/.config/opencode/opencode.json` (or the existing `opencode.jsonc`) as the top-level `model` field and leaves every other setting in place. The agent also applies `GROKCODE_DEFAULT_MODEL` when a caller omits `model`, and `server_info` reports the effective value.
+
 ## Add it to Grok Bot
 
 In the Grok Bot MCP connector settings:
@@ -125,81 +148,84 @@ The server speaks [MCP Streamable HTTP](https://modelcontextprotocol.io/specific
 
 ## Install the agent on a PC
 
-Install OpenCode first (`opencode upgrade` / the [install script](https://opencode.ai)) and log in to a model provider in the normal way. Then, from this repo:
+Install [OpenCode](https://opencode.ai), Node.js 20 or newer, and git first, and log in to a model provider in the normal way. Then one command per operating system. Each installer checks those tools, clones or updates this repo, builds it, writes the config file, and registers a startup service.
 
-```bash
-npm install
-npm run build
+Replace the placeholders. The token is the value you just stored under that machine name in `MACHINE_TOKENS`. The installer generates an OpenCode password when you omit one and stores it in the config file.
+
+### Windows (PowerShell 5.1)
+
+Paste this into PowerShell. It allows scripts for this window only, downloads the installer, clones the repo, and registers a logon task:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force; $p = Join-Path $env:TEMP 'install-grokcode.ps1'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/pilppilo/grokcode/main/deploy/install-windows.ps1' -OutFile $p; & $p -MachineName desktop -RelayUrl 'wss://YOUR_WORKER.workers.dev/agent' -MachineToken 'PASTE_TOKEN' -DefaultModel 'opencode-go/deepseek-v4.1-flash' -SetOpenCodeModel
 ```
 
-`npx grokcode-agent --help` works after that build. You can also install the built package onto the machine:
+From a checkout you already have:
 
-```bash
-npm install -g ./packages/agent
-grokcode-agent --help
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy\install-windows.ps1 -MachineName desktop -RelayUrl "wss://YOUR_WORKER.workers.dev/agent" -MachineToken "PASTE_TOKEN" -DefaultModel "opencode-go/deepseek-v4.1-flash" -SetOpenCodeModel
 ```
 
-Relay only (the usual setup). The agent starts `opencode serve` on `127.0.0.1:4096` if nothing is already healthy there, then keeps the WebSocket up:
+The task runs `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File %USERPROFILE%\.config\grokcode\start-agent.ps1` at logon. The launcher loads `agent.env`, puts Node and npm on `PATH`, and loops: it logs a timestamped `starting agent` line, runs `node dist\cli.js` with hidden stdout and stderr logs, then waits 10 seconds after the process exits. Task Scheduler also restarts the launcher up to 10 times, a minute apart, with no execution time limit. Re-running the installer replaces the task. Logs (`agent.log`, `agent-out.log`, `agent-err.log`) rotate at 1 MB. `-NoStart` registers the task without starting it. Add `-Listen 127.0.0.1:8788 -McpToken "..."` for direct mode, with or without the relay.
+
+### Linux
 
 ```bash
-export GROKCODE_MACHINE_TOKEN='<the laptop token from MACHINE_TOKENS>'
-export OPENCODE_PASSWORD='<a long password>'
-grokcode-agent --name laptop --relay wss://<your-worker-host>/agent
+curl -fsSL https://raw.githubusercontent.com/pilppilo/grokcode/main/deploy/install-linux.sh | bash -s -- \
+  --name desktop \
+  --relay wss://YOUR_WORKER.workers.dev/agent \
+  --token PASTE_TOKEN \
+  --model opencode-go/deepseek-v4.1-flash \
+  --set-opencode-model
 ```
 
-Attach to a server you already started (including `opencode service`) instead of spawning one:
+From a checkout: `bash deploy/install-linux.sh` with the same flags. This installs a systemd user service (`grokcode-agent`) and tries `loginctl enable-linger`. The unit does not contain tokens. The agent reads `~/.config/grokcode/agent.env`.
 
 ```bash
-grokcode-agent --name laptop \
-  --relay wss://<your-worker-host>/agent \
-  --opencode-url http://127.0.0.1:4096 \
-  --no-spawn
-```
-
-Useful flags: `--allow-dir ~/src` (repeatable), `--opencode-bin`, `--opencode-port`, `--verbose`, `--config deploy/agent.example.json`. A copy-paste env file lives at `deploy/agent.example.env`. CLI flags win over the environment, which wins over the config file. Do not put tokens in the JSON config; the loader never reads a token field from it.
-
-The process reconnects with backoff (1s, 2s, … up to 30s) if the relay drops. If it spawned OpenCode, it restarts that process after a crash. `SIGINT` / `SIGTERM` stop both.
-
-### Linux (systemd user service)
-
-```bash
-npm install -g /path/to/grokcode/packages/agent
-mkdir -p ~/.config/grokcode ~/.config/systemd/user ~/.local/bin
-cp deploy/agent.example.env ~/.config/grokcode/agent.env
-# edit ~/.config/grokcode/agent.env
-ln -sf "$(command -v grokcode-agent)" ~/.local/bin/grokcode-agent
-cp deploy/grokcode-agent.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now grokcode-agent
-loginctl enable-linger "$USER"
+systemctl --user status grokcode-agent
 journalctl --user -u grokcode-agent -f
 ```
 
-### macOS (launchd)
-
-Copy `deploy/com.grokcode.agent.plist` to `~/Library/LaunchAgents/`. The template expects `grokcode-agent` on `/usr/local/bin` and contains placeholder token strings; edit those on the machine, then:
+### macOS
 
 ```bash
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.grokcode.agent.plist
-launchctl enable gui/$UID/com.grokcode.agent
-launchctl kickstart -k gui/$UID/com.grokcode.agent
+curl -fsSL https://raw.githubusercontent.com/pilppilo/grokcode/main/deploy/install-macos.sh | bash -s -- \
+  --name desktop \
+  --relay wss://YOUR_WORKER.workers.dev/agent \
+  --token PASTE_TOKEN \
+  --model opencode-go/deepseek-v4.1-flash \
+  --set-opencode-model
 ```
 
-Logs: `/tmp/grokcode-agent.log`. Prefer storing tokens in the plist only on that Mac, or wrap the binary in a shell script that `source`s `~/.config/grokcode/agent.env` if you do not want them in the plist.
+From a checkout: `bash deploy/install-macos.sh` with the same flags. This bootstraps a LaunchAgent. Tokens stay in `~/.config/grokcode/agent.env`. Logs are `~/.config/grokcode/agent.log` and `agent.err.log`.
 
-### Windows (Task Scheduler)
+Direct mode on either Unix installer: add `--listen 127.0.0.1:8788 --mcp-token PASTE_MCP_TOKEN`. Omit `--relay` and `--token` to use only direct mode. `--no-start` writes the config and the service unit without starting it.
 
-In PowerShell, after `npm install -g`:
+### What the agent reads
 
-```powershell
-mkdir $env:USERPROFILE\.config\grokcode -Force
-copy deploy\agent.example.env $env:USERPROFILE\.config\grokcode\agent.env
-# edit agent.env
-powershell -ExecutionPolicy Bypass -File deploy\install-windows-task.ps1
-Start-ScheduledTask -TaskName GrokcodeAgent
+On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.config/grokcode` (`%USERPROFILE%\.config\grokcode` on Windows). `--config` or `GROKCODE_CONFIG` selects a file or a directory instead. Real environment variables override the file. CLI flags override both. Tokens may live in either file.
+
+`GROKCODE_OPENCODE_MODE` is `auto` (default), `attach`, or `spawn`.
+
+* **auto** attaches when an OpenCode server is already listening and accepts `OPENCODE_PASSWORD`, and says so in the log, including that this agent did not start it and will not stop it. If the password is rejected, the agent starts its own server on another port. A server recorded in `opencode.pid` is reused, restarted if it dies, and stopped when the agent exits.
+* **attach** (`--no-spawn`) never starts or kills OpenCode. A rejected password is an error.
+* **spawn** (`--spawn`) owns the process. A foreign server on the port is replaced. Set `GROKCODE_OPENCODE_ON_FOREIGN=next-port` to move aside instead, or `attach` to keep a server that accepts the password.
+
+The process reconnects to the relay with backoff (1s, 2s, … up to 30s). `SIGINT` / `SIGTERM` stop the agent and any OpenCode process it spawned.
+
+Foreground run, after `npm install` and `npm run build` in a checkout:
+
+```bash
+node packages/agent/dist/cli.js --help
 ```
 
-The task runs at logon and restarts on failure. `opencode serve` is started by the agent with `shell` on Windows so the `opencode.cmd` shim works.
+```bash
+export GROKCODE_MACHINE_TOKEN='<the token from MACHINE_TOKENS>'
+export OPENCODE_PASSWORD='<a long password>'
+node packages/agent/dist/cli.js --name laptop --relay wss://YOUR_WORKER.workers.dev/agent
+```
+
+`opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops the process tree on exit.
 
 ## Direct mode and Tailscale
 
@@ -236,7 +262,7 @@ npm test
 npm run typecheck
 ```
 
-Tests cover token checks, the directory allowlist (POSIX and Windows paths), the relay frame protocol, hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
+Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol, hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
 
 Layout:
 
@@ -244,7 +270,7 @@ Layout:
 packages/shared        MCP tools, OpenCode client, relay hub, frames
 packages/relay-worker  Cloudflare Worker + RelayHubDO
 packages/agent         grokcode-agent CLI
-deploy/                systemd, launchd, Windows task, example env
+deploy/                systemd, launchd, Windows task and launcher, per-OS installers, example env
 ```
 
 ## Limits
