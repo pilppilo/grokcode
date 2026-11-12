@@ -1,0 +1,27 @@
+{
+  "name": "grokcode-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-PC agent that exposes local OpenCode to a Grok Bot MCP client, via the Cloudflare relay or directly.",
+  "bin": {
+    "grokcode-agent": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "grokcode-shared": "0.1.0",
+    "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

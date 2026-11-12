@@ -1,0 +1,244 @@
+import { assertDirectoryAllowed, detectPlatform, directoryAllowed, type PathPlatform } from "./paths.js";
+import { OpenCodeClient, type FormView, type PermissionView, type ProjectInfo, type SessionSummary } from "./opencode.js";
+import { asRecord, assertId, isOpName, optionalString, requiredString, type OpName } from "./protocol.js";
+import { ToolError } from "./errors.js";
+
+export interface ExecutorContext {
+  api: OpenCodeClient;
+  allowDirs?: readonly string[];
+  platform?: PathPlatform;
+  home?: string;
+}
+
+function ctxOf(ctx: ExecutorContext) {
+  return {
+    api: ctx.api,
+    allowDirs: ctx.allowDirs ?? [],
+    platform: ctx.platform ?? detectPlatform(),
+    home: ctx.home ?? homedir(),
+  };
+}
+
+function homedir(): string {
+  return process.env.HOME || process.env.USERPROFILE || "/";
+}
+
+function numberArg(value: unknown, field: string, min: number, max: number): number | undefined {
+  if (value == null || value === "") return undefined;
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new ToolError(`${field} must be an integer from ${min} to ${max}.`, "invalid_argument");
+  }
+  return n;
+}
+
+function filterSessions(sessions: SessionSummary[], allowDirs: readonly string[], platform: PathPlatform, home: string) {
+  if (allowDirs.length === 0) return sessions;
+  return sessions.filter((session) => directoryAllowed(session.directory, allowDirs, platform, home));
+}
+
+function filterProjects(projects: ProjectInfo[], allowDirs: readonly string[], platform: PathPlatform, home: string) {
+  if (allowDirs.length === 0) return projects;
+  return projects.filter((project) => !project.directory || directoryAllowed(project.directory, allowDirs, platform, home));
+}
+
+async function filterPermissions(
+  items: PermissionView[],
+  api: OpenCodeClient,
+  allowDirs: readonly string[],
+  platform: PathPlatform,
+  home: string,
+): Promise<PermissionView[]> {
+  if (allowDirs.length === 0) return items;
+  const cache = new Map<string, string | undefined>();
+  const kept: PermissionView[] = [];
+  for (const item of items) {
+    if (!item.sessionId) continue;
+    if (!cache.has(item.sessionId)) {
+      try {
+        const session = await api.getSession(item.sessionId);
+        cache.set(item.sessionId, session.directory);
+      } catch {
+        cache.set(item.sessionId, undefined);
+      }
+    }
+    if (directoryAllowed(cache.get(item.sessionId), allowDirs, platform, home)) kept.push(item);
+  }
+  return kept;
+}
+
+async function filterForms(
+  items: FormView[],
+  api: OpenCodeClient,
+  allowDirs: readonly string[],
+  platform: PathPlatform,
+  home: string,
+): Promise<FormView[]> {
+  if (allowDirs.length === 0) return items;
+  const cache = new Map<string, string | undefined>();
+  const kept: FormView[] = [];
+  for (const item of items) {
+    if (!item.sessionId) continue;
+    if (!cache.has(item.sessionId)) {
+      try {
+        const session = await api.getSession(item.sessionId);
+        cache.set(item.sessionId, session.directory);
+      } catch {
+        cache.set(item.sessionId, undefined);
+      }
+    }
+    if (directoryAllowed(cache.get(item.sessionId), allowDirs, platform, home)) kept.push(item);
+  }
+  return kept;
+}
+
+/**
+ * Run one allowlisted OpenCode operation. The relay never forwards raw HTTP;
+ * both the agent and tests go through this function.
+ */
+export async function executeOp(ctxIn: ExecutorContext, op: string, params: unknown): Promise<unknown> {
+  if (!isOpName(op)) throw new ToolError(`Unknown op ${op}.`, "unknown_op");
+  const ctx = ctxOf(ctxIn);
+  const p = asRecord(params);
+  const guardDir = (directory: string | undefined) =>
+    assertDirectoryAllowed(directory, ctx.allowDirs, ctx.platform, ctx.home);
+
+  switch (op as OpName) {
+    case "server_info":
+      return ctx.api.serverInfo();
+    case "list_projects":
+      return { projects: filterProjects(await ctx.api.listProjects(), ctx.allowDirs, ctx.platform, ctx.home) };
+    case "list_sessions": {
+      const directory = optionalString(p.directory);
+      if (directory) guardDir(directory);
+      const sessions = await ctx.api.listSessions({
+        directory,
+        limit: numberArg(p.limit, "limit", 1, 100),
+        search: optionalString(p.search),
+      });
+      return { sessions: filterSessions(sessions, ctx.allowDirs, ctx.platform, ctx.home) };
+    }
+    case "start_session": {
+      const directory = requiredString(p.directory, "directory", 4096);
+      guardDir(directory);
+      const session = await ctx.api.startSession({
+        directory,
+        title: optionalString(p.title),
+        agent: optionalString(p.agent),
+        model: p.model,
+      });
+      return { session };
+    }
+    case "send_prompt": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      const accepted = await ctx.api.sendPrompt({
+        sessionId,
+        text: requiredString(p.text, "text"),
+        agent: optionalString(p.agent),
+        model: p.model,
+      });
+      return accepted;
+    }
+    case "get_messages": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      const messages = await ctx.api.getMessages(sessionId, numberArg(p.limit, "limit", 1, 200));
+      return { messages };
+    }
+    case "get_session": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      const session = await guardSession(ctx, sessionId);
+      return { session };
+    }
+    case "get_diff": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      const messageId = optionalString(p.messageId);
+      const diff = await ctx.api.getDiff(sessionId, messageId);
+      return { diff };
+    }
+    case "list_pending_permissions": {
+      const sessionId = optionalString(p.sessionId);
+      const directory = optionalString(p.directory);
+      if (sessionId) await guardSession(ctx, sessionId);
+      if (directory) guardDir(directory);
+      let permissions = await ctx.api.listPermissions({ sessionId, directory });
+      if (!sessionId) permissions = await filterPermissions(permissions, ctx.api, ctx.allowDirs, ctx.platform, ctx.home);
+      return { permissions };
+    }
+    case "respond_permission": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      return ctx.api.respondPermission({
+        sessionId,
+        requestId: assertId(p.requestId, "requestId"),
+        decision: p.decision,
+        message: optionalString(p.message),
+      });
+    }
+    case "abort": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      return ctx.api.abort(sessionId);
+    }
+    case "list_agents": {
+      const directory = optionalString(p.directory);
+      if (directory) guardDir(directory);
+      if (ctx.allowDirs.length > 0 && !directory) {
+        throw new ToolError("directory is required when the agent allowlist is set.", "directory_denied");
+      }
+      return { agents: await ctx.api.listAgents(directory) };
+    }
+    case "list_models": {
+      const directory = optionalString(p.directory);
+      if (directory) guardDir(directory);
+      return { models: await ctx.api.listModels(directory) };
+    }
+    case "run_command": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      return ctx.api.runCommand({
+        sessionId,
+        command: requiredString(p.command, "command", 200),
+        arguments: optionalString(p.arguments),
+        agent: optionalString(p.agent),
+      });
+    }
+    case "list_forms": {
+      const sessionId = optionalString(p.sessionId);
+      const directory = optionalString(p.directory);
+      if (sessionId) await guardSession(ctx, sessionId);
+      if (directory) guardDir(directory);
+      let forms = await ctx.api.listForms({ sessionId, directory });
+      if (!sessionId) forms = await filterForms(forms, ctx.api, ctx.allowDirs, ctx.platform, ctx.home);
+      return { forms };
+    }
+    case "reply_form": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      if (p.answer == null) throw new ToolError("answer is required.", "invalid_argument");
+      return ctx.api.replyForm({
+        sessionId,
+        formId: assertId(p.formId, "formId"),
+        answer: p.answer,
+      });
+    }
+    case "delete_session": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      return ctx.api.deleteSession(sessionId);
+    }
+    default:
+      throw new ToolError(`Unknown op ${op}.`, "unknown_op");
+  }
+}
+
+async function guardSession(
+  ctx: { api: OpenCodeClient; allowDirs: readonly string[]; platform: PathPlatform; home: string },
+  sessionId: string,
+) {
+  const session = await ctx.api.getSession(sessionId);
+  assertDirectoryAllowed(session.directory, ctx.allowDirs, ctx.platform, ctx.home);
+  return session;
+}
