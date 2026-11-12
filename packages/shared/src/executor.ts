@@ -8,6 +8,8 @@ export interface ExecutorContext {
   allowDirs?: readonly string[];
   platform?: PathPlatform;
   home?: string;
+  /** provider/model applied when start_session or send_prompt omits model. */
+  defaultModel?: string;
 }
 
 function ctxOf(ctx: ExecutorContext) {
@@ -16,7 +18,21 @@ function ctxOf(ctx: ExecutorContext) {
     allowDirs: ctx.allowDirs ?? [],
     platform: ctx.platform ?? detectPlatform(),
     home: ctx.home ?? homedir(),
+    ...(ctx.defaultModel ? { defaultModel: ctx.defaultModel } : {}),
   };
+}
+
+function suppliedModel(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed === "" ? undefined : trimmed;
+  }
+  if (value && typeof value === "object") return value;
+  return undefined;
+}
+
+function effectiveModel(value: unknown, fallback: string | undefined): unknown {
+  return suppliedModel(value) ?? fallback;
 }
 
 function homedir(): string {
@@ -104,8 +120,10 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
     assertDirectoryAllowed(directory, ctx.allowDirs, ctx.platform, ctx.home);
 
   switch (op as OpName) {
-    case "server_info":
-      return ctx.api.serverInfo();
+    case "server_info": {
+      const info = await ctx.api.serverInfo();
+      return { ...info, defaultModel: ctx.defaultModel ?? null };
+    }
     case "list_projects":
       return { projects: filterProjects(await ctx.api.listProjects(), ctx.allowDirs, ctx.platform, ctx.home) };
     case "list_sessions": {
@@ -125,7 +143,7 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
         directory,
         title: optionalString(p.title),
         agent: optionalString(p.agent),
-        model: p.model,
+        model: effectiveModel(p.model, ctx.defaultModel),
       });
       return { session };
     }
@@ -136,7 +154,7 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
         sessionId,
         text: requiredString(p.text, "text"),
         agent: optionalString(p.agent),
-        model: p.model,
+        model: effectiveModel(p.model, ctx.defaultModel),
       });
       return accepted;
     }
