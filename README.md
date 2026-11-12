@@ -83,6 +83,10 @@ npx wrangler secret put MACHINE_TOKENS
 npx wrangler deploy
 ```
 
+On the Workers Free plan, register a `workers.dev` subdomain before the first deploy. In the dashboard, open Workers & Pages and set **Your subdomain**. Wrangler prompts for one if it is missing. That name is account-wide. Do not commit it. The deployed URL is `https://<worker-name>.<your-subdomain>.workers.dev`.
+
+Free-plan Durable Objects must use the SQLite backend. `packages/relay-worker/wrangler.toml` creates `RelayHubDO` with `new_sqlite_classes`. The hub routes over hibernated WebSockets and does not use key-value storage, so that backend needs no application change.
+
 `MCP_TOKEN` is one long random string (the Grok Bot bearer token).
 
 `MACHINE_TOKENS` is a JSON object, one entry per PC. Generate each value locally:
@@ -95,7 +99,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 {"laptop":"<token-for-laptop>","desktop":"<token-for-desktop>"}
 ```
 
-Wrangler prints the worker URL, `https://<name>.<account>.workers.dev`. The MCP endpoint is that origin plus `/mcp`. The agent WebSocket is the same origin plus `/agent`. Nothing in the repo should be edited to store that hostname.
+Wrangler prints the worker URL, `https://<worker-name>.<your-subdomain>.workers.dev`. The MCP endpoint is that origin plus `/mcp`. The agent WebSocket is the same origin plus `/agent`. Nothing in the repo should be edited to store that hostname.
 
 Local dry run, with secrets in a gitignored `.dev.vars` copied from `.dev.vars.example`:
 

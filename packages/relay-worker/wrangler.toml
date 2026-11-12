@@ -16,9 +16,13 @@ bindings = [
   { name = "HUB", class_name = "RelayHubDO" }
 ]
 
+# Workers Free can only create SQLite-backed Durable Objects. `new_classes`
+# is the key-value backend and fails deploy with error 10097. RelayHubDO
+# keeps routing state in memory and on hibernated WebSocket tags, so the
+# SQLite storage backend does not require any storage API calls.
 [[migrations]]
 tag = "v1"
-new_classes = ["RelayHubDO"]
+new_sqlite_classes = ["RelayHubDO"]
 
 [vars]
 # Non-secret. Real tokens are wrangler secrets, not vars.
