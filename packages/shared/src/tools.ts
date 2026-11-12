@@ -28,7 +28,8 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "server_info",
-    description: "Read OpenCode server health, API generation (v1 or v2), and version on a machine.",
+    description:
+      "Read OpenCode server health, API generation (v1 or v2), version, and the agent default model on a machine. defaultModel is null when that PC has no GROKCODE_DEFAULT_MODEL.",
     op: "server_info",
     inputSchema: { type: "object", properties: { machine }, required: [] },
   },
@@ -55,7 +56,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "start_session",
     description:
-      "Create an OpenCode session for an absolute working directory. Optional model is `provider/model` (for example `anthropic/claude-sonnet-5`). Optional agent is the OpenCode agent id (for example `build`).",
+      "Create an OpenCode session for an absolute working directory. Optional model is `provider/model` (for example `opencode-go/deepseek-v4.1-flash`). When model is omitted, the agent uses that PC's GROKCODE_DEFAULT_MODEL if one is set. Optional agent is the OpenCode agent id (for example `build`).",
     op: "start_session",
     inputSchema: {
       type: "object",

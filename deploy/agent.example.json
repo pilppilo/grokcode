@@ -1,9 +1,9 @@
 {
   "name": "laptop",
   "relay": "wss://YOUR_WORKER.workers.dev/agent",
-  "listen": "127.0.0.1:8788",
   "opencodeHostname": "127.0.0.1",
   "opencodePort": 4096,
-  "spawn": true,
+  "opencodeMode": "auto",
+  "defaultModel": "opencode-go/deepseek-v4.1-flash",
   "allowDirs": []
 }
