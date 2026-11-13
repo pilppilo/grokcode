@@ -52,6 +52,7 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
   }
 
   if (config.loadedFrom.length > 0) io.log(`Loaded config from ${config.loadedFrom.join(", ")}.`);
+  io.log(`OpenCode mode ${config.opencodeMode} (${config.opencodeModeSource}).`);
   if (config.defaultModel) io.log(`Default model ${config.defaultModel}.`);
   if (config.opencodeUrl && config.opencodeMode === "spawn") {
     io.log("Ignoring --opencode-url because OpenCode mode is spawn.");

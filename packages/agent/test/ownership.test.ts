@@ -236,6 +236,36 @@ test("attach waits without spawning and does not kill OpenCode when the agent st
   assert.equal(quiet.spawned.length, 0);
 });
 
+test("attach mode never reaches spawnAt even if a pid file and replace policy are set", async () => {
+  const harness = deps({
+    probe: async () => "down" as const,
+    listeningPid: async () => 77,
+    portBusy: async () => true,
+    readPidFile: () => ({ listenerPid: 77, spawnPid: 70, host, port: 4096 }),
+    alive: () => true,
+    supervise: async () => {
+      throw new Error("spawnAt was called");
+    },
+  });
+  const ensured = await ensureOpenCode({
+    mode: "attach",
+    onForeign: "replace",
+    host,
+    port: 4096,
+    command: "opencode",
+    env: {},
+    signal: new AbortController().signal,
+    verbose: false,
+    pidFile: "/tmp/unused",
+    log: () => {},
+    deps: harness,
+  });
+  assert.equal(ensured.owned, false);
+  assert.equal(ensured.baseUrl, "http://127.0.0.1:4096");
+  await ensured.stop();
+  assert.deepEqual(harness.killed, []);
+});
+
 test("a server started on request is not killed when the agent exits", async () => {
   const record: PidRecord = { listenerPid: 77, spawnPid: 70, host, port: 4096, detached: true };
   const harness = deps({
