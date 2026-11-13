@@ -29,7 +29,7 @@ Checked against the current OpenCode docs, not the older route table alone.
   * Diff: `GET /api/session/:id/diff`. Events: `GET /api/event` (SSE). This bridge polls instead of holding that stream open, because a remote MCP call and a Cloudflare request both time out long before a coding turn finishes.
 * **v1 fallback.** If `/api/info` is not a JSON API, the agent uses the [v1 server routes](https://opencode.ai/docs/server/): `POST /session/:id/prompt_async`, `POST /session/:id/abort`, `POST /session/:id/permissions/:id` (and `/permission/:id/reply` if that 404s), `GET /session/status`, `GET /global/health`. Password env `OPENCODE_SERVER_PASSWORD` is also accepted. On a v2 server those unprefixed paths are the web UI and return HTML; the client treats HTML as "not this API" and does not pretend it succeeded.
 
-`opencode serve --port 4096` is still the foreground server. OpenCode also has a per-user background service (`opencode service`, often port 49374 on macOS/Linux and 28894 on Windows). Point the agent at whichever one you want with `--opencode-url`.
+OpenCode 2.x's app looks for its managed background service (`~/.local/state/opencode/service.json`, `%USERPROFILE%\.local\state\opencode\service.json` on Windows). A standalone `opencode serve` is invisible to that app, so opening OpenCode starts a second server. `start_opencode` starts the managed service instead (`opencode service start`) once its hostname and port match the agent. See [One OpenCode server](#one-opencode-server).
 
 ## Tools
 
@@ -38,8 +38,8 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | Tool | What it does |
 | --- | --- |
 | `list_machines` | PCs currently connected. |
-| `opencode_status` | Whether `opencode serve` is reachable, plus url, version, and pid when known. Does not start or stop anything. |
-| `start_opencode` | Start `opencode serve` on the configured host and port. Only call when the user explicitly asks to open/start OpenCode. If one is already reachable, returns its status and does not start another. On Windows the `opencode` name is resolved to `opencode.exe` (or a `.cmd` run via `cmd.exe`), never a `.ps1` or extensionless shim. The process is detached and is not stopped when the agent exits. If it is still booting when the call returns, `reachable` is false and `started` is true. |
+| `opencode_status` | Whether OpenCode is reachable, plus url, version, and pid when known. When it is reachable, `managedService` is true if that listener is the managed service registered in the state `service.json` (url or pid). Does not start or stop anything and never returns a password. |
+| `start_opencode` | Start OpenCode's managed service (`opencode service start`) so the desktop app and grokcode share one server. Only call when the user explicitly asks to open/start OpenCode. If one is already reachable, returns its status and does not start another. If the managed service hostname or port does not match the agent, it returns an error and does not change that config or stop the service. `GROKCODE_OPENCODE_LAUNCH=serve` keeps a standalone `opencode serve`. On Windows the `opencode` name is resolved to `opencode.exe` (or a `.cmd` run via `cmd.exe`), never a `.ps1` or extensionless shim. The process is detached and is not stopped when the agent exits. If it is still booting when the call returns, `reachable` is false and `started` is true. |
 | `server_info` | Health, API generation, version, and the agent's default model (`null` when unset). |
 | `list_projects` / `list_sessions` | Projects and sessions. |
 | `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). If `model` is omitted, the agent sends `GROKCODE_DEFAULT_MODEL` when that PC has one. |
@@ -218,6 +218,23 @@ On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.co
 
 The process reconnects to the relay with backoff (1s, 2s, … up to 30s). `SIGINT` / `SIGTERM` stop the agent. They stop an OpenCode process only when this run is supervising it (`auto` or `spawn`). `start_opencode` launches a detached process, so it survives an agent exit or crash and is not part of the agent's process tree.
 
+### One OpenCode server
+
+The OpenCode app and grokcode should use the same server. The app does not see a standalone `opencode serve`. It reads the managed service in `~/.local/state/opencode/service.json` and, if that file is missing, starts `opencode serve --service` itself (port 28894 on Windows, a different port on macOS and Linux).
+
+Set the managed service once, to the same host, port, and password the agent uses (defaults `127.0.0.1` and `4096`, and the `OPENCODE_PASSWORD` in `agent.env`). Run these yourself. The installers print them and do not run them. `opencode service set` stops a running service, so run it only when you mean to reconfigure:
+
+```bash
+opencode service set hostname 127.0.0.1
+opencode service set port 4096
+opencode service set password <the OPENCODE_PASSWORD this agent uses>
+opencode service start
+```
+
+`start_opencode` then runs `opencode service start` with the resolved executable (on Windows, `opencode.exe`), detached, in the directory you pass. It still waits until that port answers, within the same ready window as before. If `~/.config/opencode/service.json` (`%USERPROFILE%\.config\opencode\service.json` on Windows) has a different hostname or port, or those fields are unset, the tool returns an error that names the `opencode service set` commands. It does not write the file and it does not stop or restart the service.
+
+`GROKCODE_OPENCODE_LAUNCH=serve` (or `--opencode-launch serve`) keeps the previous standalone `opencode serve --hostname … --port …`. The default is `service`. Attach mode is unchanged: the agent still does not start OpenCode unless `start_opencode` is called, and there is no stop or restart tool.
+
 Foreground run, after `npm install` and `npm run build` in a checkout:
 
 ```bash
@@ -230,7 +247,7 @@ export OPENCODE_PASSWORD='<a long password>'
 node packages/agent/dist/cli.js --name laptop --relay wss://YOUR_WORKER.workers.dev/agent
 ```
 
-In `spawn` and `auto`, `opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops that supervised process tree on exit. `start_opencode` is different: on Windows it uses `Start-Process` without `-Wait`, so `deploy/start-agent.ps1` does not hang and the server keeps running after the agent exits.
+In `spawn` and `auto`, `opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops that supervised process tree on exit. `start_opencode` is different: it starts the managed service (or a standalone server when `GROKCODE_OPENCODE_LAUNCH=serve`). On Windows it resolves `opencode.exe` and uses `Start-Process` without `-Wait`, so `deploy/start-agent.ps1` does not hang and the server keeps running after the agent exits.
 
 ## Direct mode and Tailscale
 
@@ -267,7 +284,7 @@ npm test
 npm run typecheck
 ```
 
-Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, the default `attach` OpenCode mode, `start_opencode` idempotency and the rule that an agent exit does not kill a detached server, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
+Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, the default `attach` OpenCode mode, `start_opencode` using the managed service (and refusing a hostname or port that does not match, without writing that config), `opencode_status` reporting `managedService` without a password, `start_opencode` idempotency and the rule that an agent exit does not kill a detached server, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
 
 Layout:
 
