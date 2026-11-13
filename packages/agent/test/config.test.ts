@@ -115,11 +115,12 @@ test("--config and GROKCODE_CONFIG select an explicit file", () => {
   assert.deepEqual(fromEnv.loadedFrom, [file]);
 
   const json = path.join(home, "agent.json");
-  writeFileSync(json, JSON.stringify({ name: "json-box", listen: "127.0.0.1:8788", mcpToken: MCP, password: "secret" }));
+  writeFileSync(json, JSON.stringify({ name: "json-box", listen: "127.0.0.1:8788", mcpToken: MCP, password: "secret", opencodeLaunch: "serve" }));
   const fromFlag = loadConfig(["--config", json, "--no-spawn"], { HOME: home, GROKCODE_CONFIG: file });
   assert.equal(fromFlag.name, "json-box");
   assert.equal(fromFlag.password, "secret");
   assert.equal(fromFlag.opencodeMode, "attach");
+  assert.equal(fromFlag.opencodeLaunch, "serve");
   assert.doesNotThrow(() => validateConfig(fromFlag));
   assert.throws(() => loadConfig(["--config", path.join(home, "missing.env")], {}), /not found/);
 });
@@ -130,6 +131,8 @@ test("default model and opencode mode are validated", () => {
     HOME: home,
   });
   assert.equal(config.opencodeMode, "attach");
+  assert.equal(config.opencodeLaunch, "service");
+  assert.equal(config.opencodeLaunchSource, "default");
   assert.equal(config.spawn, false);
   assert.doesNotThrow(() => validateConfig(config));
   assert.throws(
@@ -137,6 +140,19 @@ test("default model and opencode mode are validated", () => {
     /provider\/model/,
   );
   assert.throws(() => loadConfig(["--opencode-mode", "sideways"], {}), /auto, attach, or spawn/);
+  assert.throws(() => loadConfig(["--opencode-launch", "both"], {}), /service or serve/);
+  const standalone = loadConfig(
+    ["--relay", "wss://example.test/agent", "--token", TOKEN, "--opencode-launch", "serve"],
+    { HOME: home, GROKCODE_OPENCODE_LAUNCH: "service" },
+  );
+  assert.equal(standalone.opencodeLaunch, "serve");
+  assert.equal(standalone.opencodeLaunchSource, "flag --opencode-launch");
+  const fromEnv = loadConfig(["--relay", "wss://example.test/agent", "--token", TOKEN], {
+    HOME: home,
+    GROKCODE_OPENCODE_LAUNCH: "serve",
+  });
+  assert.equal(fromEnv.opencodeLaunch, "serve");
+  assert.equal(fromEnv.opencodeLaunchSource, "environment GROKCODE_OPENCODE_LAUNCH");
   const opted = loadConfig(
     ["--relay", "wss://example.test/agent", "--token", TOKEN, "--opencode-mode", "auto"],
     { HOME: home },

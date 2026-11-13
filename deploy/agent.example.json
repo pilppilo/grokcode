@@ -4,6 +4,7 @@
   "opencodeHostname": "127.0.0.1",
   "opencodePort": 4096,
   "opencodeMode": "attach",
+  "opencodeLaunch": "service",
   "defaultModel": "opencode-go/deepseek-v4.1-flash",
   "allowDirs": []
 }

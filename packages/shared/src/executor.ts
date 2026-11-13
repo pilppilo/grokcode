@@ -12,11 +12,16 @@ export interface OpenCodeStatus {
   pid?: number;
   /** True when this call started a server. False when one was already reachable. */
   started?: boolean;
+  /**
+   * When reachable, true if the listener is OpenCode's managed service
+   * (the url or pid in ~/.local/state/opencode/service.json). Never a password.
+   */
+  managedService?: boolean;
 }
 
 export interface OpenCodeControl {
   status(): Promise<OpenCodeStatus>;
-  /** Start opencode serve only for an explicit start_opencode call. Must not stop it later. */
+  /** Start OpenCode only for an explicit start_opencode call. Must not stop it later. */
   start(directory?: string): Promise<OpenCodeStatus>;
 }
 

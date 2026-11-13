@@ -1,6 +1,7 @@
 import { ToolError, detectOpenCode, type OpenCodeClient, type OpenCodeControl, type OpenCodeStatus } from "grokcode-shared";
 
-import { START_OPENCODE_READY_MS, launchDetached, requestOpenCode, serveLaunch } from "./launch.js";
+import { START_OPENCODE_READY_MS, launchDetached, requestOpenCode, serveLaunch, serviceStartLaunch, type DetachRequest } from "./launch.js";
+import { assertServiceEndpoint, isManagedService, readServiceRegistration } from "./opencode-managed.js";
 import { readPidRecord, writePidRecord } from "./ownership.js";
 import { isPidAlive, listeningPid } from "./ports.js";
 import { probeOpenCode, type ProbeResult } from "./supervisor.js";
@@ -16,10 +17,18 @@ export interface OpenCodeServiceOptions {
   pidFile: string;
   signal: AbortSignal;
   log: (line: string) => void;
+  /** `service` (default) runs `opencode service start`. `serve` keeps a standalone server. */
+  launchMode?: "service" | "serve";
+  /** Home used to read OpenCode's service config and state files. */
+  home?: string;
+  /** Test hook for those files. Production reads them from disk. */
+  readText?: (file: string) => string | undefined;
   /** Test hook. Production uses a detached Start-Process / unref'd child. */
-  launch?: () => Promise<{ pid?: number }> | { pid?: number };
+  launch?: (spec: DetachRequest) => Promise<{ pid?: number }> | { pid?: number };
   probe?: () => Promise<ProbeResult>;
   identify?: () => Promise<{ version?: string; api?: "v1" | "v2" } | undefined>;
+  /** Test hook for opencode_status. Production calls detectOpenCode. */
+  detect?: () => Promise<{ version?: string; api?: "v1" | "v2" } | undefined>;
   listeningPid?: () => Promise<number | undefined>;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -120,20 +129,38 @@ export function createOpenCodeService(options: OpenCodeServiceOptions): OpenCode
     return isPidAlive(recorded) ? recorded : undefined;
   };
 
+  const detect =
+    options.detect ??
+    (async () => {
+      const client = await detectOpenCode({ baseUrl: options.baseUrl, auth, timeoutMs: 3_000 });
+      current = client;
+      return { ...(client.version ? { version: client.version } : {}), api: client.api };
+    });
+
+  const managedService = (pid?: number): boolean => {
+    if (!options.home) return false;
+    const registration = readServiceRegistration(options.home, options.env, options.readText);
+    return isManagedService(registration, { url: options.baseUrl, ...(pid ? { pid } : {}) });
+  };
+
+  const withManaged = (status: OpenCodeStatus): OpenCodeStatus => {
+    if (!status.reachable) return status;
+    return { ...status, managedService: managedService(status.pid) };
+  };
+
   const control: OpenCodeControl = {
     async status(): Promise<OpenCodeStatus> {
       const pid = await knownPid();
       try {
-        const client = await detectOpenCode({ baseUrl: options.baseUrl, auth, timeoutMs: 3_000 });
-        current = client;
-        return {
+        const client = await detect();
+        return withManaged({
           reachable: true,
           url: options.baseUrl,
-          ...(client.version ? { version: client.version } : {}),
-          api: client.api,
+          ...(client?.version ? { version: client.version } : {}),
+          ...(client?.api ? { api: client.api } : {}),
           ...(pid ? { pid } : {}),
           started: false,
-        };
+        });
       } catch {
         return { reachable: false, url: options.baseUrl, ...(pid ? { pid } : {}), started: false };
       }
@@ -144,19 +171,28 @@ export function createOpenCodeService(options: OpenCodeServiceOptions): OpenCode
         childEnv.OPENCODE_PASSWORD = options.password;
         childEnv.OPENCODE_SERVER_PASSWORD = options.password;
       }
-      const spec = serveLaunch(options.host, options.port, options.command, childEnv, directory);
-      return requestOpenCode({
+      const mode = options.launchMode ?? "service";
+      const spec =
+        mode === "serve"
+          ? serveLaunch(options.host, options.port, options.command, childEnv, directory)
+          : serviceStartLaunch(options.command, childEnv, directory);
+      const probed = await probe();
+      if (probed === "down" && mode === "service") {
+        assertServiceEndpoint(options.home, options.env, options.host, options.port, options.readText);
+      }
+      const started = await requestOpenCode({
         host: options.host,
         port: options.port,
         signal: options.signal,
         probe,
-        launch: options.launch ?? (() => launchDetached(spec)),
+        launch: () => (options.launch ? options.launch(spec) : launchDetached(spec)),
         identify,
         listeningPid: pidOf,
         writePid: (record) => writePidRecord(options.pidFile, record),
         sleep,
         readyTimeoutMs: START_OPENCODE_READY_MS,
       });
+      return withManaged(started);
     },
   };
 

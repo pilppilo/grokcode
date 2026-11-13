@@ -21,6 +21,9 @@ export interface AgentConfig {
   opencodeBin: string;
   opencodeHostname: string;
   opencodePort: number;
+  /** `service` starts `opencode service start`. `serve` starts a standalone server. */
+  opencodeLaunch: "service" | "serve";
+  opencodeLaunchSource: string;
   allowDirs: string[];
   maxSyncWaitMs: number;
   verbose: boolean;
@@ -66,6 +69,7 @@ Options:
   --opencode-bin <path>      OpenCode executable (default: opencode)
   --opencode-hostname <host> Bind address for a spawned server (default: 127.0.0.1)
   --opencode-port <port>     Port for a spawned server (default: 4096)
+  --opencode-launch <mode>   service (default) or serve. service runs "opencode service start"
   --default-model <model>    provider/model used when a caller omits model
   --allow-dir <path>         Absolute directory OpenCode may use (repeatable)
   --sync-wait-ms <ms>        Cap for wait=true / wait_session (default 20000, max 25000)
@@ -79,7 +83,7 @@ Environment:
   GROKCODE_LISTEN, GROKCODE_MCP_TOKEN, GROKCODE_OPENCODE_URL
   GROKCODE_ALLOW_DIRS (comma-separated), GROKCODE_OPENCODE_BIN
   GROKCODE_DEFAULT_MODEL, GROKCODE_OPENCODE_MODE, GROKCODE_OPENCODE_ON_FOREIGN
-  GROKCODE_CONFIG
+  GROKCODE_OPENCODE_LAUNCH (service or serve), GROKCODE_CONFIG
   OPENCODE_PASSWORD or OPENCODE_SERVER_PASSWORD, OPENCODE_SERVER_USERNAME
 `;
 
@@ -96,6 +100,7 @@ export interface FileConfig {
   opencodeBin?: string;
   opencodeHostname?: string;
   opencodePort?: number;
+  opencodeLaunch?: "service" | "serve";
   allowDirs?: string[];
   maxSyncWaitMs?: number;
   verbose?: boolean;
@@ -148,6 +153,13 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function asLaunch(value: unknown): "service" | "serve" | undefined {
+  const text = asString(value)?.toLowerCase();
+  if (!text) return undefined;
+  if (text === "service" || text === "serve") return text;
+  throw new Error(`GROKCODE_OPENCODE_LAUNCH must be service or serve. Got "${text}".`);
+}
+
 function asMode(value: unknown): OpenCodeMode | undefined {
   const text = asString(value);
   if (!text) return undefined;
@@ -194,6 +206,7 @@ export function fileConfigFromPairs(pairs: Record<string, unknown>): FileConfig 
   const opencodePort = asNumber(pick("opencodePort"));
   const maxSyncWaitMs = asNumber(pick("maxSyncWaitMs"));
   const opencodeMode = asMode(pick("opencodeMode", "GROKCODE_OPENCODE_MODE"));
+  const opencodeLaunch = asLaunch(pick("opencodeLaunch", "GROKCODE_OPENCODE_LAUNCH"));
   const opencodeOnForeign = asForeign(pick("opencodeOnForeign", "GROKCODE_OPENCODE_ON_FOREIGN"));
   if (name) config.name = name;
   if (relay) config.relay = relay;
@@ -212,6 +225,7 @@ export function fileConfigFromPairs(pairs: Record<string, unknown>): FileConfig 
   if (opencodePort !== undefined) config.opencodePort = opencodePort;
   if (maxSyncWaitMs !== undefined) config.maxSyncWaitMs = maxSyncWaitMs;
   if (opencodeMode) config.opencodeMode = opencodeMode;
+  if (opencodeLaunch) config.opencodeLaunch = opencodeLaunch;
   if (opencodeOnForeign) config.opencodeOnForeign = opencodeOnForeign;
   return config;
 }
@@ -301,6 +315,7 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
       "opencode-bin": { type: "string" },
       "opencode-hostname": { type: "string" },
       "opencode-port": { type: "string" },
+      "opencode-launch": { type: "string" },
       "default-model": { type: "string" },
       "allow-dir": { type: "string", multiple: true },
       "sync-wait-ms": { type: "string" },
@@ -336,6 +351,23 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
   const mcpToken = values["mcp-token"] ?? envString(env, "GROKCODE_MCP_TOKEN") ?? file.mcpToken;
   const maxSyncWaitMs = Number(values["sync-wait-ms"] ?? envString(env, "GROKCODE_SYNC_WAIT_MS") ?? file.maxSyncWaitMs ?? 20_000);
   const opencodePort = Number(values["opencode-port"] ?? envString(env, "GROKCODE_OPENCODE_PORT") ?? file.opencodePort ?? 4096);
+  const flagLaunch = asLaunch(values["opencode-launch"]);
+  const envLaunch = asLaunch(envString(env, "GROKCODE_OPENCODE_LAUNCH"));
+  let opencodeLaunch: "service" | "serve";
+  let opencodeLaunchSource: string;
+  if (flagLaunch) {
+    opencodeLaunch = flagLaunch;
+    opencodeLaunchSource = "flag --opencode-launch";
+  } else if (envLaunch) {
+    opencodeLaunch = envLaunch;
+    opencodeLaunchSource = "environment GROKCODE_OPENCODE_LAUNCH";
+  } else if (file.opencodeLaunch) {
+    opencodeLaunch = file.opencodeLaunch;
+    opencodeLaunchSource = `config file ${loadedFrom[loadedFrom.length - 1] ?? "config file"}`;
+  } else {
+    opencodeLaunch = "service";
+    opencodeLaunchSource = "default";
+  }
   const defaultModel = values["default-model"] ?? envString(env, "GROKCODE_DEFAULT_MODEL") ?? file.defaultModel;
 
   if (values.spawn && values["no-spawn"]) throw new Error("Pass only one of --spawn and --no-spawn.");
@@ -387,6 +419,8 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
     opencodeBin: values["opencode-bin"] ?? envString(env, "GROKCODE_OPENCODE_BIN") ?? file.opencodeBin ?? "opencode",
     opencodeHostname: values["opencode-hostname"] ?? file.opencodeHostname ?? "127.0.0.1",
     opencodePort,
+    opencodeLaunch,
+    opencodeLaunchSource,
     allowDirs,
     maxSyncWaitMs: Number.isFinite(maxSyncWaitMs) ? maxSyncWaitMs : 20_000,
     verbose: values.verbose === true || file.verbose === true || env.GROKCODE_VERBOSE === "1",

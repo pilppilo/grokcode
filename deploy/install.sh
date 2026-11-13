@@ -218,3 +218,9 @@ if [[ -n "$RELAY" ]]; then echo "Relay: configured"; fi
 if [[ -n "$LISTEN" ]]; then echo "Direct listener: configured"; fi
 if [[ -n "$MODEL" ]]; then echo "Default model: ${MODEL}"; fi
 echo "Logs: ${cfg_dir}/agent.log"
+echo "One-time OpenCode setup so the desktop app and grokcode share one server."
+echo "This installer does not run these commands. opencode service set stops a running service:"
+echo "  opencode service set hostname 127.0.0.1"
+echo "  opencode service set port 4096"
+echo "  opencode service set password <the OPENCODE_PASSWORD in ${env_file}>"
+echo "  opencode service start"
