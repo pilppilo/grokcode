@@ -12,6 +12,8 @@ export interface PidRecord {
   spawnPid?: number;
   host: string;
   port: number;
+  /** Started by start_opencode. The agent must not kill or restart this process. */
+  detached?: boolean;
 }
 
 export interface AssessInput {
@@ -28,10 +30,40 @@ export interface AssessInput {
 
 export type AssessAction =
   | { type: "attach"; owned: boolean; host: string; port: number; pid?: number; message: string }
+  | { type: "wait"; host: string; port: number; message: string }
   | { type: "spawn"; host: string; port: number; message: string; stopPids: number[] }
   | { type: "spawn-next"; host: string; message: string; stopPids: number[] }
   | { type: "replace"; host: string; port: number; pid: number; message: string; stopPids: number[] }
   | { type: "fail"; message: string };
+
+function assessAttach(input: AssessInput): AssessAction {
+  const { host, port, probe, listenerPid } = input;
+  if (probe === "up") {
+    const pidNote = listenerPid ? ` (pid ${listenerPid})` : "";
+    return {
+      type: "attach",
+      owned: false,
+      host,
+      port,
+      ...(listenerPid ? { pid: listenerPid } : {}),
+      message: `Attaching to OpenCode at ${origin(host, port)}${pidNote}. This agent did not take ownership of it and will not stop it.`,
+    };
+  }
+  if (probe === "unauthorized") {
+    return {
+      type: "wait",
+      host,
+      port,
+      message: `OpenCode at ${origin(host, port)} rejected OPENCODE_PASSWORD. The agent will keep retrying and will not start or stop a server.`,
+    };
+  }
+  return {
+    type: "wait",
+    host,
+    port,
+    message: `OpenCode is not reachable at ${origin(host, port)}. The agent will keep retrying. It will not start a server unless start_opencode is called.`,
+  };
+}
 
 function origin(host: string, port: number): string {
   return `http://${host}:${port}`;
@@ -48,12 +80,29 @@ function elsewherePid(input: AssessInput): number | undefined {
  * Decide what to do with a port that may already have an OpenCode server.
  * `auto` attaches when the password is accepted and otherwise moves to another port.
  * `spawn` owns a process, replacing a foreign server unless told to pick another port.
- * `attach` never kills and never starts a server.
+ * `attach` never kills and never starts a server. A down server is waited on, not failed closed.
+ * A server recorded as detached (start_opencode) is never killed or replaced.
  */
 export function assessOpenCode(input: AssessInput): AssessAction {
   const { mode, host, port, probe, listenerPid, record } = input;
-  const policy: ForeignPolicy | undefined =
-    mode === "attach" ? "attach" : (input.onForeign ?? (mode === "spawn" ? "replace" : undefined));
+  if (mode === "attach") return assessAttach(input);
+  if (record?.detached && listenerPid && record.host === host && record.port === port && (record.listenerPid === listenerPid || record.spawnPid === listenerPid)) {
+    if (probe === "up") {
+      return {
+        type: "attach",
+        owned: false,
+        host,
+        port,
+        pid: listenerPid,
+        message: `OpenCode at ${origin(host, port)} (pid ${listenerPid}) was started on request. This agent will not stop it.`,
+      };
+    }
+    return {
+      type: "fail",
+      message: `OpenCode pid ${listenerPid} was started on request and is not healthy at ${origin(host, port)}. This agent will not stop it.`,
+    };
+  }
+  const policy: ForeignPolicy | undefined = input.onForeign ?? (mode === "spawn" ? "replace" : undefined);
   const matchesRecord =
     !!listenerPid &&
     !!record &&
@@ -64,7 +113,6 @@ export function assessOpenCode(input: AssessInput): AssessAction {
   const stopElsewhere = oldPid ? [oldPid] : [];
 
   if (
-    mode !== "attach" &&
     record &&
     input.recordAlive &&
     record.port !== port &&
@@ -72,6 +120,16 @@ export function assessOpenCode(input: AssessInput): AssessAction {
     policy !== "replace"
   ) {
     const pid = record.listenerPid ?? record.spawnPid;
+    if (record.detached) {
+      return {
+        type: "attach",
+        owned: false,
+        host: record.host,
+        port: record.port,
+        ...(pid ? { pid } : {}),
+        message: `OpenCode at ${origin(record.host, record.port)} (pid ${pid ?? "unknown"}) was started on request. This agent will not stop it.`,
+      };
+    }
     return {
       type: "attach",
       owned: true,
@@ -83,12 +141,6 @@ export function assessOpenCode(input: AssessInput): AssessAction {
   }
 
   if (!listenerPid && probe === "down") {
-    if (mode === "attach") {
-      return {
-        type: "fail",
-        message: `OpenCode is not reachable at ${origin(host, port)}. Start it, or set GROKCODE_OPENCODE_MODE=auto so the agent can launch opencode serve.`,
-      };
-    }
     return {
       type: "spawn",
       host,
@@ -180,6 +232,7 @@ export function readPidRecord(file: string): PidRecord | undefined {
       port: parsed.port,
       ...(typeof parsed.listenerPid === "number" ? { listenerPid: parsed.listenerPid } : {}),
       ...(typeof parsed.spawnPid === "number" ? { spawnPid: parsed.spawnPid } : {}),
+      ...(parsed.detached === true ? { detached: true } : {}),
     };
   } catch {
     return undefined;
@@ -284,7 +337,34 @@ export async function ensureOpenCode(req: EnsureRequest): Promise<EnsuredOpenCod
     recordAlive: deps.alive(recordPid),
     ...(recordProbe ? { recordProbe } : {}),
   });
+  if (req.mode === "attach") {
+    if (action.type === "fail") throw new Error(action.message);
+    if (action.type !== "attach" && action.type !== "wait") {
+      throw new Error(`OpenCode mode is attach; refusing to ${action.type} a server.`);
+    }
+    req.log(action.message);
+    if (action.type === "attach" && !action.owned && !record?.detached) deps.clearPidFile();
+    const baseUrl =
+      req.attachUrl && action.host === req.host && action.port === req.port
+        ? req.attachUrl
+        : origin(action.host, action.port);
+    return {
+      baseUrl,
+      password: () => req.password,
+      owned: false,
+      stop: async () => {},
+    };
+  }
   if (action.type === "fail") throw new Error(action.message);
+  if (action.type === "wait") {
+    req.log(action.message);
+    return {
+      baseUrl: req.attachUrl ?? origin(action.host, action.port),
+      password: () => req.password,
+      owned: false,
+      stop: async () => {},
+    };
+  }
   req.log(action.message);
 
   const spawnAt = async (host: string, port: number): Promise<SupervisedProcess> =>
@@ -312,7 +392,7 @@ export async function ensureOpenCode(req: EnsureRequest): Promise<EnsuredOpenCod
   if (action.type === "attach") {
     const baseUrl = req.attachUrl && action.host === req.host && action.port === req.port ? req.attachUrl : origin(action.host, action.port);
     if (!action.owned) {
-      deps.clearPidFile();
+      if (!record?.detached) deps.clearPidFile();
       return {
         baseUrl,
         password: () => req.password,

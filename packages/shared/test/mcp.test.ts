@@ -60,12 +60,20 @@ test("initialize and tools/list advertise the shared surface", async () => {
   assert.equal(body.result.serverInfo.name, "grokcode");
 
   const list = await handleMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }), { backend: backend() });
-  const tools = ((await list.json()) as { result: { tools: { name: string }[] } }).result.tools.map((tool) => tool.name);
+  const listed = ((await list.json()) as { result: { tools: { name: string; description: string }[] } }).result.tools;
+  const tools = listed.map((tool) => tool.name);
+  const starter = listed.find((tool) => tool.name === "start_opencode");
+  assert.match(starter?.description ?? "", /only call when the user explicitly asks to open\/start OpenCode/);
+  assert.equal(listed.some((tool) => /stop_opencode|restart_opencode/.test(tool.name)), false);
   for (const name of [
     "list_machines",
+    "opencode_status",
+    "start_opencode",
     "start_session",
     "send_prompt",
     "get_messages",
+    "get_message",
+    "get_session_summary",
     "get_diff",
     "list_pending_permissions",
     "respond_permission",
@@ -196,6 +204,27 @@ test("direct mode defaults the machine and a browser origin is rejected", async 
     { backend: direct },
   );
   assert.equal(blocked.status, 403);
+});
+
+test("a large tool result keeps the end and marks the cut", async () => {
+  const ending = "FINAL_ANSWER_END";
+  const relay = backend({
+    call: async () => ({ blob: `START_${"x".repeat(100_000)}${ending}` }),
+  });
+  const response = await handleMcpRequest(
+    post({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "server_info", arguments: { machine: "laptop" } },
+    }),
+    { backend: relay },
+  );
+  const body = await toolText(response);
+  assert.equal(body.isError, false);
+  assert.match(body.text, /omitted \d+ characters from the start/);
+  assert.equal(body.text.includes("START_"), false);
+  assert.ok(body.text.endsWith(`${ending}"\n}`));
 });
 
 test("relay mode requires a machine when two are online", async () => {

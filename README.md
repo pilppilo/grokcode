@@ -38,12 +38,17 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | Tool | What it does |
 | --- | --- |
 | `list_machines` | PCs currently connected. |
+| `opencode_status` | Whether `opencode serve` is reachable, plus url, version, and pid when known. Does not start or stop anything. |
+| `start_opencode` | Start `opencode serve` on the configured host and port. Only call when the user explicitly asks to open/start OpenCode. If one is already reachable, returns its status and does not start another. On Windows the `opencode` name is resolved to `opencode.exe` (or a `.cmd` run via `cmd.exe`), never a `.ps1` or extensionless shim. The process is detached and is not stopped when the agent exits. If it is still booting when the call returns, `reachable` is false and `started` is true. |
 | `server_info` | Health, API generation, version, and the agent's default model (`null` when unset). |
 | `list_projects` / `list_sessions` | Projects and sessions. |
 | `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). If `model` is omitted, the agent sends `GROKCODE_DEFAULT_MODEL` when that PC has one. |
 | `send_prompt` | Admit a prompt. `wait` defaults to **false**. `wait: true` polls until idle, a permission is pending, or ~20s. |
 | `wait_session` | Same poll, without sending another prompt. |
-| `get_session` / `get_messages` | Status (`idle`, `busy`, `retry`) and transcript text. |
+| `get_session` | Status (`idle`, `busy`, `retry`). |
+| `get_session_summary` | Status, last activity time, the last assistant message's final text, its finish reason or error, and the last few tool calls. |
+| `get_messages` | Transcript. `order` defaults to `desc` (newest first). `limit` caps the page (default 30). `tail` or `last` selects the newest N. Final text comes first; tool calls are a compact list (`includeToolOutput`: `summary` by default, or `full` / `none`). Reasoning is omitted unless `includeReasoning` is true. Cuts keep the end of the text and mark what was removed. |
+| `get_message` | One message by id. Page its parts with `partOffset` / `partLimit` (the default page is the last parts) or its text with `offset` / `maxChars`. Omit `offset` to see the end; pass `0` to start at the beginning. |
 | `get_diff` | Session or turn diff. |
 | `list_pending_permissions` / `respond_permission` | `approve`/`once`, `always`, `deny`/`reject`. |
 | `abort` | Interrupt the current turn. |
@@ -52,7 +57,7 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | `list_forms` / `reply_form` | v2 forms, or the v1 question tool. |
 | `delete_session` | Delete a session and its children. |
 
-If a wait hits the budget the tool returns `status: "running"` and you poll `get_session` / `get_messages` or call `wait_session` again. Pending permissions come back as `status: "needs_permission"` so you can answer them instead of waiting out the clock.
+If a wait hits the budget the tool returns `status: "running"` and you poll `get_session_summary` or `get_messages`, or call `wait_session` again. Pending permissions come back as `status: "needs_permission"` so you can answer them instead of waiting out the clock. A long assistant turn is not one blob of reasoning: `get_session_summary` returns the final text and finish state, and `get_message` pages anything that was cut.
 
 The relay forwards **named operations only**. It is not an open HTTP proxy to the PC.
 
@@ -203,15 +208,15 @@ Direct mode on either Unix installer: add `--listen 127.0.0.1:8788 --mcp-token P
 
 ### What the agent reads
 
-On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.config/grokcode` (`%USERPROFILE%\.config\grokcode` on Windows). `--config` or `GROKCODE_CONFIG` selects a file or a directory instead. Real environment variables override the file. CLI flags override both. Tokens may live in either file.
+On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.config/grokcode` (`%USERPROFILE%\.config\grokcode` on Windows). `--config` or `GROKCODE_CONFIG` selects a file or a directory instead. Real environment variables override the file, except `GROKCODE_OPENCODE_MODE`: a mode written in the config file wins over a process environment value and over `GROKCODE_SPAWN`, so a stale `auto` cannot start a server the file set to `attach`. CLI flags (`--opencode-mode`, `--spawn`, `--no-spawn`) still win. Tokens may live in either file. The startup log names the mode and where it came from. Files written by Windows PowerShell 5.1 (`Set-Content` ANSI or Unicode, CRLF) are accepted.
 
-`GROKCODE_OPENCODE_MODE` is `auto` (default), `attach`, or `spawn`.
+`GROKCODE_OPENCODE_MODE` is `attach` (default), `auto`, or `spawn`.
 
-* **auto** attaches when an OpenCode server is already listening and accepts `OPENCODE_PASSWORD`, and says so in the log, including that this agent did not start it and will not stop it. If the password is rejected, the agent starts its own server on another port. A server recorded in `opencode.pid` is reused, restarted if it dies, and stopped when the agent exits.
-* **attach** (`--no-spawn`) never starts or kills OpenCode. A rejected password is an error.
-* **spawn** (`--spawn`) owns the process. A foreign server on the port is replaced. Set `GROKCODE_OPENCODE_ON_FOREIGN=next-port` to move aside instead, or `attach` to keep a server that accepts the password.
+* **attach** (default, also `--no-spawn`) never starts, restarts, or kills OpenCode. If the server is down or rejects `OPENCODE_PASSWORD`, the agent stays up, tool calls report OpenCode unavailable, and it retries the connection with backoff (1s, 2s, … up to 30s). It does not stop a server on the way out, including one started earlier by `start_opencode`.
+* **auto** attaches when an OpenCode server is already listening and accepts `OPENCODE_PASSWORD`, and says so in the log, including that this agent did not start it and will not stop it. If the password is rejected, the agent starts its own server on another port. A server it is supervising is reused, restarted if it dies, and stopped when the agent exits. A server marked detached in `opencode.pid` is left alone.
+* **spawn** (`--spawn`) owns the process it launches. A foreign server on the port is replaced. Set `GROKCODE_OPENCODE_ON_FOREIGN=next-port` to move aside instead, or `attach` to keep a server that accepts the password.
 
-The process reconnects to the relay with backoff (1s, 2s, … up to 30s). `SIGINT` / `SIGTERM` stop the agent and any OpenCode process it spawned.
+The process reconnects to the relay with backoff (1s, 2s, … up to 30s). `SIGINT` / `SIGTERM` stop the agent. They stop an OpenCode process only when this run is supervising it (`auto` or `spawn`). `start_opencode` launches a detached process, so it survives an agent exit or crash and is not part of the agent's process tree.
 
 Foreground run, after `npm install` and `npm run build` in a checkout:
 
@@ -225,7 +230,7 @@ export OPENCODE_PASSWORD='<a long password>'
 node packages/agent/dist/cli.js --name laptop --relay wss://YOUR_WORKER.workers.dev/agent
 ```
 
-`opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops the process tree on exit.
+In `spawn` and `auto`, `opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops that supervised process tree on exit. `start_opencode` is different: on Windows it uses `Start-Process` without `-Wait`, so `deploy/start-agent.ps1` does not hang and the server keeps running after the agent exits.
 
 ## Direct mode and Tailscale
 
@@ -262,7 +267,7 @@ npm test
 npm run typecheck
 ```
 
-Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol, hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
+Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, the default `attach` OpenCode mode, `start_opencode` idempotency and the rule that an agent exit does not kill a detached server, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
 
 Layout:
 
@@ -276,7 +281,9 @@ deploy/                systemd, launchd, Windows task and launcher, per-OS insta
 ## Limits
 
 * Sync wait is capped at 20s (hard max 25s) so a Cloudflare request and a typical MCP client timeout are not held for a whole coding turn. Long work is admit + poll.
-* `GET /api/session/active` is documented as an object of foreground sessions. The client treats a session id used as a key, or as an entry in an array, as busy. If a future release nests that map differently, `get_session` may report `idle` too early; `get_messages` is still the source of truth.
+* `GET /api/session/active` is documented as an object of foreground sessions. The client treats a session id used as a key, or as an entry in an array, as busy. If a future release nests that map differently, `get_session` may report `idle` too early; `get_messages` and `get_session_summary` are still the source of truth.
+* `get_messages` does not return the raw OpenCode message. Reasoning is left out unless `includeReasoning` is true, tool output defaults to a short tail, and final text over the per-message cap keeps its end with an `omitted … from the start` marker. `get_message` is how you read the rest, by parts or by character offset. The same projection is used for v2 `content` parts and the v1 `{ info, parts }` shape.
+* Relay results larger than 900,000 characters (under the 1 MiB WebSocket message limit) are split into numbered chunks and reassembled by the hub. A frame that still cannot be parsed fails the call with `frame_too_large` instead of being dropped. The MCP text cap is 80,000 characters and also keeps the end.
 * The agent does not subscribe to `/api/event`. Permission waits are discovered by polling.
 * v1 command and question routes follow the published v1 server doc and may differ on very old builds.
 * Live `opencode serve` was not executed in CI. The HTTP client is tested against fixtures shaped like the current v2 and v1 responses.

@@ -1,20 +1,46 @@
 import { assertDirectoryAllowed, detectPlatform, directoryAllowed, type PathPlatform } from "./paths.js";
+import { parseToolOutputMode, type ToolOutputMode } from "./messages.js";
 import { OpenCodeClient, type FormView, type PermissionView, type ProjectInfo, type SessionSummary } from "./opencode.js";
 import { asRecord, assertId, isOpName, optionalString, requiredString, type OpName } from "./protocol.js";
 import { ToolError } from "./errors.js";
 
+export interface OpenCodeStatus {
+  reachable: boolean;
+  url: string;
+  version?: string;
+  api?: "v1" | "v2";
+  pid?: number;
+  /** True when this call started a server. False when one was already reachable. */
+  started?: boolean;
+}
+
+export interface OpenCodeControl {
+  status(): Promise<OpenCodeStatus>;
+  /** Start opencode serve only for an explicit start_opencode call. Must not stop it later. */
+  start(directory?: string): Promise<OpenCodeStatus>;
+}
+
 export interface ExecutorContext {
-  api: OpenCodeClient;
+  /** Absent when OpenCode is not reachable yet. */
+  api?: OpenCodeClient;
   allowDirs?: readonly string[];
   platform?: PathPlatform;
   home?: string;
   /** provider/model applied when start_session or send_prompt omits model. */
   defaultModel?: string;
+  opencodeControl?: OpenCodeControl;
 }
 
 function ctxOf(ctx: ExecutorContext) {
+  const api = ctx.api;
+  if (!api) {
+    throw new ToolError(
+      "OpenCode is unavailable. The agent keeps retrying and does not start a server on its own. Call start_opencode only when the user explicitly asks to open or start OpenCode.",
+      "opencode_unavailable",
+    );
+  }
   return {
-    api: ctx.api,
+    api,
     allowDirs: ctx.allowDirs ?? [],
     platform: ctx.platform ?? detectPlatform(),
     home: ctx.home ?? homedir(),
@@ -46,6 +72,25 @@ function numberArg(value: unknown, field: string, min: number, max: number): num
     throw new ToolError(`${field} must be an integer from ${min} to ${max}.`, "invalid_argument");
   }
   return n;
+}
+
+function boolArg(value: unknown, field: string, fallback: boolean): boolean {
+  if (value == null || value === "") return fallback;
+  if (value === true || value === "true" || value === 1 || value === "1") return true;
+  if (value === false || value === "false" || value === 0 || value === "0") return false;
+  throw new ToolError(`${field} must be a boolean.`, "invalid_argument");
+}
+
+function orderArg(value: unknown): "asc" | "desc" {
+  if (value == null || value === "") return "desc";
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (text === "asc" || text === "desc") return text;
+  throw new ToolError("order must be asc or desc.", "invalid_argument");
+}
+
+function toolOutputArg(value: unknown, fallback: ToolOutputMode): ToolOutputMode {
+  if (value == null || value === "") return fallback;
+  return parseToolOutputMode(value);
 }
 
 function filterSessions(sessions: SessionSummary[], allowDirs: readonly string[], platform: PathPlatform, home: string) {
@@ -114,6 +159,9 @@ async function filterForms(
  */
 export async function executeOp(ctxIn: ExecutorContext, op: string, params: unknown): Promise<unknown> {
   if (!isOpName(op)) throw new ToolError(`Unknown op ${op}.`, "unknown_op");
+  if (op === "opencode_status" || op === "start_opencode") {
+    return runOpenCodeControl(ctxIn, op, params);
+  }
   const ctx = ctxOf(ctxIn);
   const p = asRecord(params);
   const guardDir = (directory: string | undefined) =>
@@ -161,13 +209,35 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
     case "get_messages": {
       const sessionId = assertId(p.sessionId, "sessionId");
       await guardSession(ctx, sessionId);
-      const messages = await ctx.api.getMessages(sessionId, numberArg(p.limit, "limit", 1, 200));
-      return { messages };
+      return ctx.api.listMessages(sessionId, {
+        limit: numberArg(p.limit, "limit", 1, 200),
+        tail: numberArg(p.tail ?? p.last, "tail", 1, 200),
+        order: orderArg(p.order),
+        includeReasoning: boolArg(p.includeReasoning, "includeReasoning", false),
+        includeToolOutput: toolOutputArg(p.includeToolOutput, "summary"),
+      });
+    }
+    case "get_message": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      return ctx.api.getMessage(sessionId, assertId(p.messageId, "messageId"), {
+        partOffset: numberArg(p.partOffset, "partOffset", 0, 100_000),
+        partLimit: numberArg(p.partLimit, "partLimit", 1, 100),
+        offset: numberArg(p.offset, "offset", 0, 50_000_000),
+        maxChars: numberArg(p.maxChars, "maxChars", 1, 60_000),
+        includeReasoning: boolArg(p.includeReasoning, "includeReasoning", false),
+        includeToolOutput: toolOutputArg(p.includeToolOutput, "full"),
+      });
     }
     case "get_session": {
       const sessionId = assertId(p.sessionId, "sessionId");
       const session = await guardSession(ctx, sessionId);
       return { session };
+    }
+    case "get_session_summary": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      const session = await guardSession(ctx, sessionId);
+      return ctx.api.summarizeSession(session);
     }
     case "get_diff": {
       const sessionId = assertId(p.sessionId, "sessionId");
@@ -250,6 +320,21 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
     default:
       throw new ToolError(`Unknown op ${op}.`, "unknown_op");
   }
+}
+
+async function runOpenCodeControl(
+  ctx: ExecutorContext,
+  op: "opencode_status" | "start_opencode",
+  params: unknown,
+): Promise<OpenCodeStatus> {
+  const control = ctx.opencodeControl;
+  if (!control) throw new ToolError(`${op} is not available on this connection.`, "unsupported");
+  if (op === "opencode_status") return control.status();
+  const directory = optionalString(asRecord(params).directory);
+  if (directory) {
+    assertDirectoryAllowed(directory, ctx.allowDirs ?? [], ctx.platform ?? detectPlatform(), ctx.home ?? homedir());
+  }
+  return control.start(directory);
 }
 
 async function guardSession(

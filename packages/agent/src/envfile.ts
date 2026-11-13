@@ -2,6 +2,40 @@
 
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * PowerShell 5.1 Set-Content -Encoding Unicode writes UTF-16 LE. Node's utf8
+ * reader then sees NUL between every character and drops every key, so a file
+ * that says attach is invisible and GROKCODE_SPAWN can start a server.
+ */
+export function decodeConfigText(bytes: Buffer): string {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return bytes.subarray(2).toString("utf16le");
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const swapped = Buffer.alloc(bytes.length - 2);
+    for (let i = 2; i + 1 < bytes.length; i += 2) {
+      swapped[i - 2] = bytes[i + 1]!;
+      swapped[i - 1] = bytes[i]!;
+    }
+    return swapped.toString("utf16le");
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return bytes.subarray(3).toString("utf8");
+  }
+  if (looksLikeUtf16Le(bytes)) return bytes.toString("utf16le");
+  return bytes.toString("utf8");
+}
+
+function looksLikeUtf16Le(bytes: Buffer): boolean {
+  if (bytes.length < 8 || bytes.length % 2 !== 0) return false;
+  let zeros = 0;
+  const samples = Math.min(bytes.length, 64);
+  for (let i = 1; i < samples; i += 2) {
+    if (bytes[i] === 0) zeros++;
+  }
+  return zeros >= 4;
+}
+
 export function parseEnvFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const rawLine of text.split(/\r?\n/)) {

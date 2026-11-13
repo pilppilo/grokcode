@@ -3,7 +3,7 @@
   "relay": "wss://YOUR_WORKER.workers.dev/agent",
   "opencodeHostname": "127.0.0.1",
   "opencodePort": 4096,
-  "opencodeMode": "auto",
+  "opencodeMode": "attach",
   "defaultModel": "opencode-go/deepseek-v4.1-flash",
   "allowDirs": []
 }
