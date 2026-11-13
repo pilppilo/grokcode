@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 
 import path from "node:path";
 
-import { HELP, loadConfig, parseListen, validateConfig, type AgentConfig } from "./config.js";
+import { HELP, homeFromEnv, loadConfig, parseListen, validateConfig, type AgentConfig } from "./config.js";
 import { ensureOpenCode } from "./ownership.js";
 import { runRelayConnection } from "./relay.js";
 import { listenDirect } from "./server.js";
@@ -53,6 +53,7 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
 
   if (config.loadedFrom.length > 0) io.log(`Loaded config from ${config.loadedFrom.join(", ")}.`);
   io.log(`OpenCode mode ${config.opencodeMode} (${config.opencodeModeSource}).`);
+  io.log(`OpenCode launch ${config.opencodeLaunch} (${config.opencodeLaunchSource}).`);
   if (config.defaultModel) io.log(`Default model ${config.defaultModel}.`);
   if (config.opencodeUrl && config.opencodeMode === "spawn") {
     io.log("Ignoring --opencode-url because OpenCode mode is spawn.");
@@ -89,11 +90,14 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
 
   const served = endpointOf(ensured.baseUrl, endpoint.host, endpoint.port);
   const password = ensured.password();
+  const home = homeFromEnv(env);
   const service = createOpenCodeService({
     baseUrl: ensured.baseUrl,
     host: served.host,
     port: served.port,
     command: config.opencodeBin,
+    launchMode: config.opencodeLaunch,
+    ...(home ? { home } : {}),
     username: config.username,
     ...(password ? { password } : {}),
     env,

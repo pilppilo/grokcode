@@ -169,3 +169,9 @@ if ($hasRelay) { Write-Host "Relay: configured" }
 if ($hasDirect) { Write-Host "Direct listener: configured" }
 if (-not [string]::IsNullOrWhiteSpace($DefaultModel)) { Write-Host "Default model: $DefaultModel" }
 Write-Host "Logs: $(Join-Path $configDir 'agent.log')"
+Write-Host "One-time OpenCode setup so the desktop app and grokcode share one server."
+Write-Host "This installer does not run these commands. opencode service set stops a running service:"
+Write-Host "  opencode service set hostname 127.0.0.1"
+Write-Host "  opencode service set port 4096"
+Write-Host "  opencode service set password <the OPENCODE_PASSWORD in $envFile>"
+Write-Host "  opencode service start"
