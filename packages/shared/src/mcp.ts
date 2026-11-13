@@ -227,7 +227,8 @@ async function callTool(
       clock,
     );
   }
-  return options.backend.call(machine, tool.op ?? tool.name, params, 20_000);
+  const timeout = tool.name === "start_opencode" ? 30_000 : 20_000;
+  return options.backend.call(machine, tool.op ?? tool.name, params, timeout);
 }
 
 function spreadAdmitted(admitted: unknown): Record<string, unknown> {

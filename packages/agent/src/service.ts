@@ -1,6 +1,6 @@
 import { ToolError, detectOpenCode, type OpenCodeClient, type OpenCodeControl, type OpenCodeStatus } from "grokcode-shared";
 
-import { launchDetached, requestOpenCode, serveLaunch } from "./launch.js";
+import { START_OPENCODE_READY_MS, launchDetached, requestOpenCode, serveLaunch } from "./launch.js";
 import { readPidRecord, writePidRecord } from "./ownership.js";
 import { isPidAlive, listeningPid } from "./ports.js";
 import { probeOpenCode, type ProbeResult } from "./supervisor.js";
@@ -155,6 +155,7 @@ export function createOpenCodeService(options: OpenCodeServiceOptions): OpenCode
         listeningPid: pidOf,
         writePid: (record) => writePidRecord(options.pidFile, record),
         sleep,
+        readyTimeoutMs: START_OPENCODE_READY_MS,
       });
     },
   };

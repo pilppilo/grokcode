@@ -1,16 +1,136 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { launchDetached, requestOpenCode, windowsStartScript, type SpawnLike } from "../src/launch.ts";
+import { launchDetached, requestOpenCode, resolveWindowsExecutable, windowsStartScript, type SpawnLike } from "../src/launch.ts";
+import { ToolError } from "grokcode-shared";
 import type { PidRecord } from "../src/ownership.ts";
 import { createOpenCodeService } from "../src/service.ts";
 
 test("windows launcher uses Start-Process and does not wait", () => {
   const script = windowsStartScript("opencode", ["serve", "--hostname", "127.0.0.1", "--port", "4096"], "C:\\work");
   assert.match(script, /Start-Process/);
+  assert.match(script, /\$ErrorActionPreference = 'Stop'/);
   assert.doesNotMatch(script, /-Wait/);
   assert.match(script, /WindowStyle Hidden/);
   assert.match(script, /4096/);
+});
+
+test("Windows resolution prefers opencode.exe over npm ps1 and extensionless shims", () => {
+  const npm = "C:\\Users\\weaka\\AppData\\Roaming\\npm";
+  const exe = `${npm}\\node_modules\\@opencode\\cli\\bin\\opencode.exe`;
+  const present = new Set(
+    [`${npm}\\opencode.ps1`, `${npm}\\opencode.cmd`, `${npm}\\opencode`, exe].map((file) => file.toLowerCase()),
+  );
+  const exists = (file: string) => present.has(file.toLowerCase());
+  const resolved = resolveWindowsExecutable("opencode", {
+    path: npm,
+    exists,
+    readText: () => '"%dp0%\\node_modules\\@opencode\\cli\\bin\\opencode.exe" %*',
+  });
+  assert.equal(resolved.file.toLowerCase(), exe.toLowerCase());
+  assert.deepEqual(resolved.argsPrefix, []);
+});
+
+test("Windows resolution runs a cmd shim through cmd.exe when the unpacked exe is missing", () => {
+  const npm = "C:\\npm";
+  const cmd = `${npm}\\opencode.cmd`;
+  const exists = (file: string) => file.toLowerCase() === cmd.toLowerCase();
+  const resolved = resolveWindowsExecutable("opencode", {
+    path: `${npm};C:\\empty`,
+    exists,
+    comSpec: "C:\\Windows\\System32\\cmd.exe",
+    readText: () => "echo only a shim",
+  });
+  assert.equal(resolved.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(resolved.argsPrefix, ["/d", "/c", cmd]);
+});
+
+test("Windows resolution fails fast and names every candidate", () => {
+  assert.throws(
+    () =>
+      resolveWindowsExecutable("opencode", {
+        path: "C:\\npm",
+        exists: () => false,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof ToolError);
+      assert.equal(err.code, "opencode_bin");
+      assert.match(err.message, /opencode\.exe/);
+      assert.match(err.message, /opencode\.cmd/);
+      assert.match(err.message, /opencode\.bat/);
+      assert.doesNotMatch(err.message, /opencode\.ps1/);
+      return true;
+    },
+  );
+});
+
+test("extensionless and ps1 shims are not launched", () => {
+  const npm = "C:\\npm";
+  assert.throws(
+    () =>
+      resolveWindowsExecutable("opencode", {
+        path: npm,
+        exists: (file) => /\\opencode(\.ps1)?$/i.test(file),
+      }),
+    /Could not resolve "opencode"/,
+  );
+});
+
+test("an explicit .ps1 path is not executed; a sibling exe is", () => {
+  const ps1 = "C:\\npm\\opencode.ps1";
+  const exe = "C:\\npm\\opencode.exe";
+  const resolved = resolveWindowsExecutable(ps1, {
+    path: "",
+    exists: (file) => file.toLowerCase() === exe.toLowerCase(),
+  });
+  assert.equal(resolved.file.toLowerCase(), exe.toLowerCase());
+});
+
+test("Start-Process is timed out instead of hanging the relay call", async () => {
+  let killed = false;
+  await assert.rejects(
+    () =>
+      launchDetached({
+        platform: "win32",
+        command: "C:\\bin\\opencode.exe",
+        args: ["serve", "--port", "4096"],
+        env: {},
+        exists: (file) => file.toLowerCase() === "c:\\bin\\opencode.exe",
+        launchTimeoutMs: 30,
+        spawnImpl: () => ({
+          stdout: { on() {} },
+          stderr: { on() {} },
+          once() {},
+          kill() {
+            killed = true;
+            return true;
+          },
+        }),
+      }),
+    /timed out after 30ms/,
+  );
+  assert.equal(killed, true);
+});
+
+test("a server that is still booting is returned before the relay timeout", async () => {
+  let sleeps = 0;
+  const record = await requestOpenCode({
+    host: "127.0.0.1",
+    port: 4096,
+    probe: async () => "down",
+    launch: async () => ({ pid: 4242 }),
+    identify: async () => undefined,
+    listeningPid: async () => undefined,
+    writePid: () => {},
+    sleep: async () => {
+      sleeps += 1;
+    },
+    readyTimeoutMs: 0,
+  });
+  assert.equal(record.started, true);
+  assert.equal(record.reachable, false);
+  assert.equal(record.pid, 4242);
+  assert.equal(sleeps, 0);
 });
 
 test("start_opencode is idempotent and an agent abort does not kill the process", async () => {
