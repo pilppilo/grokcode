@@ -43,7 +43,10 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). If `model` is omitted, the agent sends `GROKCODE_DEFAULT_MODEL` when that PC has one. |
 | `send_prompt` | Admit a prompt. `wait` defaults to **false**. `wait: true` polls until idle, a permission is pending, or ~20s. |
 | `wait_session` | Same poll, without sending another prompt. |
-| `get_session` / `get_messages` | Status (`idle`, `busy`, `retry`) and transcript text. |
+| `get_session` | Status (`idle`, `busy`, `retry`). |
+| `get_session_summary` | Status, last activity time, the last assistant message's final text, its finish reason or error, and the last few tool calls. |
+| `get_messages` | Transcript. `order` defaults to `desc` (newest first). `limit` caps the page (default 30). `tail` or `last` selects the newest N. Final text comes first; tool calls are a compact list (`includeToolOutput`: `summary` by default, or `full` / `none`). Reasoning is omitted unless `includeReasoning` is true. Cuts keep the end of the text and mark what was removed. |
+| `get_message` | One message by id. Page its parts with `partOffset` / `partLimit` (the default page is the last parts) or its text with `offset` / `maxChars`. Omit `offset` to see the end; pass `0` to start at the beginning. |
 | `get_diff` | Session or turn diff. |
 | `list_pending_permissions` / `respond_permission` | `approve`/`once`, `always`, `deny`/`reject`. |
 | `abort` | Interrupt the current turn. |
@@ -52,7 +55,7 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | `list_forms` / `reply_form` | v2 forms, or the v1 question tool. |
 | `delete_session` | Delete a session and its children. |
 
-If a wait hits the budget the tool returns `status: "running"` and you poll `get_session` / `get_messages` or call `wait_session` again. Pending permissions come back as `status: "needs_permission"` so you can answer them instead of waiting out the clock.
+If a wait hits the budget the tool returns `status: "running"` and you poll `get_session_summary` or `get_messages`, or call `wait_session` again. Pending permissions come back as `status: "needs_permission"` so you can answer them instead of waiting out the clock. A long assistant turn is not one blob of reasoning: `get_session_summary` returns the final text and finish state, and `get_message` pages anything that was cut.
 
 The relay forwards **named operations only**. It is not an open HTTP proxy to the PC.
 
@@ -262,7 +265,7 @@ npm test
 npm run typecheck
 ```
 
-Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol, hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
+Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
 
 Layout:
 
@@ -276,7 +279,9 @@ deploy/                systemd, launchd, Windows task and launcher, per-OS insta
 ## Limits
 
 * Sync wait is capped at 20s (hard max 25s) so a Cloudflare request and a typical MCP client timeout are not held for a whole coding turn. Long work is admit + poll.
-* `GET /api/session/active` is documented as an object of foreground sessions. The client treats a session id used as a key, or as an entry in an array, as busy. If a future release nests that map differently, `get_session` may report `idle` too early; `get_messages` is still the source of truth.
+* `GET /api/session/active` is documented as an object of foreground sessions. The client treats a session id used as a key, or as an entry in an array, as busy. If a future release nests that map differently, `get_session` may report `idle` too early; `get_messages` and `get_session_summary` are still the source of truth.
+* `get_messages` does not return the raw OpenCode message. Reasoning is left out unless `includeReasoning` is true, tool output defaults to a short tail, and final text over the per-message cap keeps its end with an `omitted … from the start` marker. `get_message` is how you read the rest, by parts or by character offset. The same projection is used for v2 `content` parts and the v1 `{ info, parts }` shape.
+* Relay results larger than 900,000 characters (under the 1 MiB WebSocket message limit) are split into numbered chunks and reassembled by the hub. A frame that still cannot be parsed fails the call with `frame_too_large` instead of being dropped. The MCP text cap is 80,000 characters and also keeps the end.
 * The agent does not subscribe to `/api/event`. Permission waits are discovered by polling.
 * v1 command and question routes follow the published v1 server doc and may differ on very old builds.
 * Live `opencode serve` was not executed in CI. The HTTP client is tested against fixtures shaped like the current v2 and v1 responses.

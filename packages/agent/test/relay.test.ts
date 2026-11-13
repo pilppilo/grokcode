@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { encodeMessage, parseMessage } from "grokcode-shared";
+import { encodeMessage, MAX_FRAME, parseChunkedResult, parseMessage } from "grokcode-shared";
 
 import { runRelayConnection, type RelaySocket } from "../src/relay.ts";
 
@@ -76,6 +76,50 @@ test("relay client authenticates, answers rpc, and does not put the token in fra
     assert.fail("expected a successful result");
   }
 
+  socket.close();
+  await done;
+  ac.abort();
+});
+
+test("a result larger than the websocket budget is sent as marked chunks", async () => {
+  const ac = new AbortController();
+  let socket!: FakeSocket;
+  const payload = { answer: "END", blob: "q".repeat(1_000_000) };
+  const done = runRelayConnection({
+    url: "ws://relay.example/agent",
+    name: "laptop",
+    token: "machine-token-0123456789abcd",
+    signal: ac.signal,
+    execute: async () => payload,
+    connect: () => {
+      socket = new FakeSocket();
+      queueMicrotask(() => {
+        socket.readyState = 1;
+        socket.emit("open");
+      });
+      return socket;
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  socket.emit("message", encodeMessage({ type: "rpc", id: "big", op: "get_messages", params: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const frames = socket.sent.filter((line) => {
+    try {
+      return parseMessage(line).type === "result";
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(frames.length > 1);
+  const pieces: Array<string | undefined> = [];
+  for (const frame of frames) {
+    assert.ok(frame.length <= MAX_FRAME);
+    const message = parseMessage(frame);
+    assert.equal(message.type, "result");
+    if (message.type !== "result" || !message.ok || typeof message.part !== "number") continue;
+    pieces[message.part] = message.data as string;
+  }
+  assert.deepEqual(parseChunkedResult(pieces), payload);
   socket.close();
   await done;
   ac.abort();

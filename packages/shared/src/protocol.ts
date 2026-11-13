@@ -9,7 +9,9 @@ export const OPS = [
   "start_session",
   "send_prompt",
   "get_messages",
+  "get_message",
   "get_session",
+  "get_session_summary",
   "get_diff",
   "list_pending_permissions",
   "respond_permission",
@@ -62,6 +64,12 @@ export interface ResultMessage {
   id: string;
   ok: true;
   data: unknown;
+  /**
+   * Set together when `data` is one slice of a JSON string. The hub joins
+   * every slice and parses the payload. A single frame leaves these unset.
+   */
+  part?: number;
+  parts?: number;
 }
 
 export interface ErrorMessage {
@@ -80,7 +88,61 @@ export type AgentMessage =
   | ResultMessage
   | ErrorMessage;
 
-const MAX_FRAME = 2_000_000;
+/**
+ * Stay under the 1 MiB Cloudflare WebSocket message limit. Larger results are
+ * split by {@link encodeResultFrames} so the platform never drops them.
+ */
+export const MAX_FRAME = 900_000;
+
+export function encodeResultFrames(id: string, data: unknown): string[] {
+  const single = JSON.stringify({ type: "result", id, ok: true, data });
+  if (single.length <= MAX_FRAME) return [single];
+  const payload = JSON.stringify(data);
+  const slices: string[] = [];
+  let cursor = 0;
+  while (cursor < payload.length) {
+    let size = Math.min(payload.length - cursor, 250_000);
+    while (size > 0) {
+      const probe = JSON.stringify({
+        type: "result",
+        id,
+        ok: true,
+        part: slices.length,
+        parts: 99_999,
+        data: payload.slice(cursor, cursor + size),
+      });
+      if (probe.length <= MAX_FRAME) break;
+      size = Math.floor(size * 0.75);
+    }
+    if (size <= 0) {
+      throw new ToolError("Unable to fit a relay result into the frame limit.", "frame_too_large");
+    }
+    slices.push(payload.slice(cursor, cursor + size));
+    cursor += size;
+  }
+  return slices.map((slice, index) =>
+    JSON.stringify({
+      type: "result",
+      id,
+      ok: true,
+      part: index,
+      parts: slices.length,
+      data: slice,
+    }),
+  );
+}
+
+/** Join chunk `data` slices back into the original result value. */
+export function parseChunkedResult(pieces: Array<string | undefined>): unknown {
+  if (pieces.some((piece) => typeof piece !== "string")) {
+    throw new ToolError("Incomplete relay result.", "bad_frame");
+  }
+  try {
+    return JSON.parse(pieces.join(""));
+  } catch {
+    throw new ToolError("Relay result chunks did not form JSON.", "bad_frame");
+  }
+}
 
 export function encodeMessage(message: AgentMessage): string {
   return JSON.stringify(message);
@@ -142,7 +204,18 @@ export function parseMessage(raw: string): AgentMessage {
     if (typeof id !== "string" || typeof ok !== "boolean") {
       throw new ToolError("Invalid result frame.", "bad_frame");
     }
-    if (ok) return { type: "result", id, ok: true, data: (value as { data?: unknown }).data };
+    if (ok) {
+      const part = (value as { part?: unknown }).part;
+      const parts = (value as { parts?: unknown }).parts;
+      return {
+        type: "result",
+        id,
+        ok: true,
+        data: (value as { data?: unknown }).data,
+        ...(typeof part === "number" ? { part } : {}),
+        ...(typeof parts === "number" ? { parts } : {}),
+      };
+    }
     const error = (value as { error?: { code?: unknown; message?: unknown; status?: unknown } }).error;
     return {
       type: "result",

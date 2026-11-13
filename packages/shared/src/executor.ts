@@ -1,4 +1,5 @@
 import { assertDirectoryAllowed, detectPlatform, directoryAllowed, type PathPlatform } from "./paths.js";
+import { parseToolOutputMode, type ToolOutputMode } from "./messages.js";
 import { OpenCodeClient, type FormView, type PermissionView, type ProjectInfo, type SessionSummary } from "./opencode.js";
 import { asRecord, assertId, isOpName, optionalString, requiredString, type OpName } from "./protocol.js";
 import { ToolError } from "./errors.js";
@@ -46,6 +47,25 @@ function numberArg(value: unknown, field: string, min: number, max: number): num
     throw new ToolError(`${field} must be an integer from ${min} to ${max}.`, "invalid_argument");
   }
   return n;
+}
+
+function boolArg(value: unknown, field: string, fallback: boolean): boolean {
+  if (value == null || value === "") return fallback;
+  if (value === true || value === "true" || value === 1 || value === "1") return true;
+  if (value === false || value === "false" || value === 0 || value === "0") return false;
+  throw new ToolError(`${field} must be a boolean.`, "invalid_argument");
+}
+
+function orderArg(value: unknown): "asc" | "desc" {
+  if (value == null || value === "") return "desc";
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (text === "asc" || text === "desc") return text;
+  throw new ToolError("order must be asc or desc.", "invalid_argument");
+}
+
+function toolOutputArg(value: unknown, fallback: ToolOutputMode): ToolOutputMode {
+  if (value == null || value === "") return fallback;
+  return parseToolOutputMode(value);
 }
 
 function filterSessions(sessions: SessionSummary[], allowDirs: readonly string[], platform: PathPlatform, home: string) {
@@ -161,13 +181,35 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
     case "get_messages": {
       const sessionId = assertId(p.sessionId, "sessionId");
       await guardSession(ctx, sessionId);
-      const messages = await ctx.api.getMessages(sessionId, numberArg(p.limit, "limit", 1, 200));
-      return { messages };
+      return ctx.api.listMessages(sessionId, {
+        limit: numberArg(p.limit, "limit", 1, 200),
+        tail: numberArg(p.tail ?? p.last, "tail", 1, 200),
+        order: orderArg(p.order),
+        includeReasoning: boolArg(p.includeReasoning, "includeReasoning", false),
+        includeToolOutput: toolOutputArg(p.includeToolOutput, "summary"),
+      });
+    }
+    case "get_message": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      await guardSession(ctx, sessionId);
+      return ctx.api.getMessage(sessionId, assertId(p.messageId, "messageId"), {
+        partOffset: numberArg(p.partOffset, "partOffset", 0, 100_000),
+        partLimit: numberArg(p.partLimit, "partLimit", 1, 100),
+        offset: numberArg(p.offset, "offset", 0, 50_000_000),
+        maxChars: numberArg(p.maxChars, "maxChars", 1, 60_000),
+        includeReasoning: boolArg(p.includeReasoning, "includeReasoning", false),
+        includeToolOutput: toolOutputArg(p.includeToolOutput, "full"),
+      });
     }
     case "get_session": {
       const sessionId = assertId(p.sessionId, "sessionId");
       const session = await guardSession(ctx, sessionId);
       return { session };
+    }
+    case "get_session_summary": {
+      const sessionId = assertId(p.sessionId, "sessionId");
+      const session = await guardSession(ctx, sessionId);
+      return ctx.api.summarizeSession(session);
     }
     case "get_diff": {
       const sessionId = assertId(p.sessionId, "sessionId");
