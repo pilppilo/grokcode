@@ -1,5 +1,6 @@
 import { errorCode, errorMessage, GrokcodeError, ToolError } from "./errors.js";
 import type { MachineInfo } from "./hub.js";
+import { truncateKeepEnd } from "./messages.js";
 import { TOOLS, toolByName } from "./tools.js";
 
 export const SERVER_NAME = "grokcode";
@@ -41,7 +42,7 @@ const DEFAULT_INSTRUCTIONS = [
   "grokcode drives OpenCode (anomalyco/opencode) on the owner's PCs.",
   "Call list_machines first. Pass machine on every later tool when more than one PC is online.",
   "start_session needs an absolute directory on that PC. send_prompt defaults to async because agent turns outlive MCP and Cloudflare timeouts.",
-  "After an async prompt, poll get_session and get_messages, or call wait_session. wait=true on send_prompt only blocks up to about 20 seconds, then returns status running.",
+  "After an async prompt, poll get_session_summary or get_messages (newest first; the final text is kept and reasoning is omitted unless includeReasoning is true). Use get_message to page a long message. wait=true on send_prompt only blocks up to about 20 seconds, then returns status running.",
   "If list_pending_permissions or a wait result says needs_permission, call respond_permission (approve/once, always, or deny/reject) before expecting more output.",
   "abort interrupts the current turn.",
 ].join(" ");
@@ -85,8 +86,7 @@ function toolResult(payload: unknown, isError = false): { content: { type: "text
 const TEXT_LIMIT = 80_000;
 
 function truncate(text: string): string {
-  if (text.length <= TEXT_LIMIT) return text;
-  return `${text.slice(0, TEXT_LIMIT)}\n… truncated ${text.length - TEXT_LIMIT} characters`;
+  return truncateKeepEnd(text, TEXT_LIMIT).text;
 }
 
 function clampWait(requested: unknown, maxSyncWaitMs: number): number {
@@ -161,7 +161,7 @@ async function pollUntilSettled(
     if (activity === "busy" || activity === "retry") sawBusy = true;
     const idleLongEnough = activity === "idle" && (sawBusy || clock.now() - started >= Math.min(IDLE_GRACE_MS, budgetMs));
     if (idleLongEnough || activity === "idle" && budgetMs === 0) {
-      const messages = await backend.call(machine, "get_messages", { sessionId, limit: 50 }, 15_000);
+      const messages = await backend.call(machine, "get_messages", { sessionId, limit: 20, order: "desc" }, 15_000);
       return {
         status: "idle",
         sessionId,
@@ -175,15 +175,15 @@ async function pollUntilSettled(
     await clock.sleep(Math.min(pollMs, Math.max(0, deadline - sleptFrom)));
     if (clock.now() <= sleptFrom) break;
   }
-  const messages = await backend.call(machine, "get_messages", { sessionId, limit: 30 }, 15_000);
+  const messages = await backend.call(machine, "get_messages", { sessionId, limit: 20, order: "desc" }, 15_000);
   return {
     status: "running",
     timedOut: true,
     sessionId,
     ...(admitted ? { admitted } : {}),
     session: lastSession,
+    hint: "The sync budget ended before OpenCode went idle. Poll get_session_summary or get_messages, or call wait_session again. get_message reads one long message in pages.",
     messages,
-    hint: "The sync budget ended before OpenCode went idle. Poll get_session and get_messages, or call wait_session again.",
   };
 }
 

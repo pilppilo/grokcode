@@ -66,6 +66,8 @@ test("initialize and tools/list advertise the shared surface", async () => {
     "start_session",
     "send_prompt",
     "get_messages",
+    "get_message",
+    "get_session_summary",
     "get_diff",
     "list_pending_permissions",
     "respond_permission",
@@ -196,6 +198,27 @@ test("direct mode defaults the machine and a browser origin is rejected", async 
     { backend: direct },
   );
   assert.equal(blocked.status, 403);
+});
+
+test("a large tool result keeps the end and marks the cut", async () => {
+  const ending = "FINAL_ANSWER_END";
+  const relay = backend({
+    call: async () => ({ blob: `START_${"x".repeat(100_000)}${ending}` }),
+  });
+  const response = await handleMcpRequest(
+    post({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "server_info", arguments: { machine: "laptop" } },
+    }),
+    { backend: relay },
+  );
+  const body = await toolText(response);
+  assert.equal(body.isError, false);
+  assert.match(body.text, /omitted \d+ characters from the start/);
+  assert.equal(body.text.includes("START_"), false);
+  assert.ok(body.text.endsWith(`${ending}"\n}`));
 });
 
 test("relay mode requires a machine when two are online", async () => {
