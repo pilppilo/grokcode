@@ -343,3 +343,13 @@ export function serveLaunch(host: string, port: number, command: string, env: No
     ...(cwd ? { cwd } : {}),
   };
 }
+
+/** `opencode service start` — the managed background service the OpenCode app attaches to. */
+export function serviceStartLaunch(command: string, env: NodeJS.ProcessEnv, cwd?: string): DetachRequest {
+  return {
+    command,
+    args: ["service", "start"],
+    env,
+    ...(cwd ? { cwd } : {}),
+  };
+}

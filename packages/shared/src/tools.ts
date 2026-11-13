@@ -36,14 +36,14 @@ export const TOOLS: ToolDef[] = [
   {
     name: "opencode_status",
     description:
-      "Read whether opencode serve is reachable on this machine. Returns reachable, url, version, and pid when one is known. Does not start or stop OpenCode.",
+      "Read whether OpenCode is reachable on this machine. Returns reachable, url, version, and pid when one is known. When reachable, managedService is true if that listener is the managed background service (state service.json url or pid). Does not start or stop OpenCode and never returns a password.",
     op: "opencode_status",
     inputSchema: { type: "object", properties: { machine }, required: [] },
   },
   {
     name: "start_opencode",
     description:
-      "Start opencode serve on this machine's configured host and port. only call when the user explicitly asks to open/start OpenCode. If a server is already reachable, return its status and do not start another. The process is detached: the agent will not stop it on exit. There is no stop or restart tool.",
+      "Start OpenCode's managed service (opencode service start) on this machine. only call when the user explicitly asks to open/start OpenCode. If a server is already reachable, return its status and do not start another. Refuses when the managed service hostname or port does not match this agent, and does not change that config or stop the service. GROKCODE_OPENCODE_LAUNCH=serve starts a standalone opencode serve instead. The process is detached: the agent will not stop it on exit. There is no stop or restart tool.",
     op: "start_opencode",
     inputSchema: {
       type: "object",
