@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { errorCode, errorMessage, HubError } from "./errors.js";
-import { encodeMessage, isOpName, parseMessage, type OpName } from "./protocol.js";
+import { encodeMessage, isOpName, parseChunkedResult, parseMessage, type OpName, type ResultMessage } from "./protocol.js";
 
 export interface SocketLike {
   send(data: string): void;
@@ -29,6 +29,12 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface ChunkBuf {
+  parts: number;
+  pieces: Array<string | undefined>;
+  got: number;
+}
+
 export interface RelayHubOptions {
   callTimeoutMs?: number;
   maxInFlight?: number;
@@ -43,6 +49,7 @@ export interface RelayHubOptions {
 export class RelayHub {
   private readonly machines = new Map<string, MachineConn>();
   private readonly pending = new Map<string, Pending>();
+  private readonly chunks = new Map<string, ChunkBuf>();
   private readonly callTimeoutMs: number;
   private readonly maxInFlight: number;
   private readonly now: () => number;
@@ -104,7 +111,12 @@ export class RelayHub {
     let message;
     try {
       message = parseMessage(raw);
-    } catch {
+    } catch (err) {
+      const id = peekFrameId(raw);
+      if (!id) return;
+      const pending = this.pending.get(id);
+      if (!pending || pending.machine !== name) return;
+      this.fail(id, new HubError(errorMessage(err), errorCode(err) === "error" ? "bad_frame" : errorCode(err)));
       return;
     }
     if (message.type === "ping") {
@@ -125,10 +137,18 @@ export class RelayHub {
     if (message.type === "result") {
       const pending = this.pending.get(message.id);
       if (!pending || pending.machine !== name) return;
+      if (!message.ok) {
+        this.fail(message.id, new HubError(message.error.message, message.error.code));
+        return;
+      }
+      if (typeof message.part === "number" || typeof message.parts === "number") {
+        this.acceptChunk(pending, message);
+        return;
+      }
       this.pending.delete(message.id);
+      this.chunks.delete(message.id);
       clearTimeout(pending.timer);
-      if (message.ok) pending.resolve(message.data);
-      else pending.reject(new HubError(message.error.message, message.error.code));
+      pending.resolve(message.data);
     }
   }
 
@@ -145,6 +165,7 @@ export class RelayHub {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.chunks.delete(id);
         reject(new HubError(`Call to ${machine} timed out after ${timeout}ms.`, "timeout"));
       }, timeout);
       this.pending.set(id, { machine, resolve, reject, timer });
@@ -165,12 +186,69 @@ export class RelayHub {
     });
   }
 
+  private acceptChunk(pending: Pending, message: ResultMessage): void {
+    const part = message.part;
+    const parts = message.parts;
+    if (
+      typeof part !== "number" ||
+      typeof parts !== "number" ||
+      !Number.isInteger(part) ||
+      !Number.isInteger(parts) ||
+      parts < 1 ||
+      part < 0 ||
+      part >= parts ||
+      typeof message.data !== "string"
+    ) {
+      this.fail(message.id, new HubError("Invalid relay result chunk.", "bad_frame"));
+      return;
+    }
+    let buf = this.chunks.get(message.id);
+    if (!buf) {
+      buf = { parts, pieces: new Array(parts), got: 0 };
+      this.chunks.set(message.id, buf);
+    }
+    if (buf.parts !== parts) {
+      this.fail(message.id, new HubError("Relay result chunk count changed.", "bad_frame"));
+      return;
+    }
+    if (buf.pieces[part] === undefined) {
+      buf.pieces[part] = message.data;
+      buf.got += 1;
+    }
+    if (buf.got !== buf.parts) return;
+    try {
+      const data = parseChunkedResult(buf.pieces);
+      this.pending.delete(message.id);
+      this.chunks.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.resolve(data);
+    } catch (err) {
+      this.fail(message.id, new HubError(errorMessage(err), errorCode(err)));
+    }
+  }
+
+  private fail(id: string, err: Error): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(id);
+    this.chunks.delete(id);
+    pending.reject(err);
+  }
+
   private rejectPending(machine: string, err: Error): void {
     for (const [id, pending] of this.pending) {
       if (pending.machine !== machine) continue;
       clearTimeout(pending.timer);
       this.pending.delete(id);
+      this.chunks.delete(id);
       pending.reject(err);
     }
   }
+}
+
+function peekFrameId(raw: string): string | undefined {
+  const head = raw.length > 800 ? raw.slice(0, 800) : raw;
+  const match = /"id"\s*:\s*"([^"\\]{1,80})"/.exec(head);
+  return match?.[1];
 }

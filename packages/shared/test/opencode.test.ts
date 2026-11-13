@@ -71,6 +71,9 @@ test("v2 client admits prompts without blocking and answers permissions", async 
     if (call.path === "/api/session/active") return jsonResponse({ data: Object.fromEntries([...active].map((id) => [id, {}])) });
     if (call.path === "/api/session/ses_1") return jsonResponse({ data: { id: "ses_1", location: { directory: "/work/app" } } });
     if (call.path === "/api/session/ses_new") return jsonResponse({ data: { id: "ses_new", location: { directory: "/work/app" } } });
+    if (call.path === "/api/session/ses_1/message/msg_a") {
+      return jsonResponse({ data: { id: "msg_a", type: "assistant", content: [{ type: "text", text: "pong" }] } });
+    }
     if (call.path === "/api/session/ses_1/message") {
       return jsonResponse({
         data: [
@@ -122,7 +125,14 @@ test("v2 client admits prompts without blocking and answers permissions", async 
   assert.equal(busy.activity, "busy");
 
   const messages = await client.getMessages("ses_1");
-  assert.equal(messages[1]?.text, "pong");
+  assert.equal(messages[0]?.id, "msg_a");
+  assert.equal(messages[0]?.text, "pong");
+  assert.equal(messages[1]?.text, "hello");
+  const messageCall = calls.find((call) => call.path === "/api/session/ses_1/message");
+  assert.equal(messageCall?.query.get("order"), "desc");
+  const one = await client.getMessage("ses_1", "msg_a");
+  assert.equal(one.text, "pong");
+  assert.equal(one.id, "msg_a");
   const diff = await client.getDiff("ses_1", "msg_u");
   assert.equal(diff[0]?.file, "a.ts");
   assert.equal(calls.find((call) => call.path.endsWith("/diff"))?.query.get("from"), "msg_u");
@@ -174,6 +184,10 @@ test("v1 fallback uses prompt_async, abort, and permission reply", async () => {
   assert.equal(session.activity, "busy");
   const messages = await client.getMessages("ses_v1");
   assert.equal(messages[0]?.text, "hi");
+  assert.equal(calls.find((call) => call.path === "/session/ses_v1/message")?.query.get("order"), null);
+  const one = await client.getMessage("ses_v1", "m1");
+  assert.equal(one.text, "hi");
+  assert.equal(one.role, "user");
   const permissions = await client.listPermissions({ sessionId: "ses_v1" });
   assert.equal(permissions[0]?.action, "bash");
   const reply = await client.respondPermission({

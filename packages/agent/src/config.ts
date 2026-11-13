@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 
 import { MACHINE_NAME, MIN_TOKEN_LENGTH } from "grokcode-shared";
 
-import { assertModelId, parseEnvFile } from "./envfile.js";
+import { assertModelId, decodeConfigText, parseEnvFile } from "./envfile.js";
 import type { ForeignPolicy, OpenCodeMode } from "./ownership.js";
 
 export interface AgentConfig {
@@ -30,6 +30,8 @@ export interface AgentConfig {
   /** Directory that holds agent.env and the OpenCode pid file. */
   configDir?: string;
   loadedFrom: string[];
+  /** Where opencodeMode was decided, for the startup log. */
+  opencodeModeSource: string;
   help: boolean;
   version: boolean;
 }
@@ -57,7 +59,7 @@ Options:
   --listen <host:port>       Serve MCP over HTTP for Tailscale or a private network
   --mcp-token <token>        Bearer token for --listen (or GROKCODE_MCP_TOKEN)
   --opencode-url <url>       Attach to an existing server
-  --opencode-mode <mode>     spawn, attach, or auto (default auto)
+  --opencode-mode <mode>     attach (default), spawn, or auto
   --on-foreign <policy>      attach, replace, or next-port when a server is already running
   --spawn                    Own the OpenCode process (mode spawn)
   --no-spawn                 Never start opencode; only attach (mode attach)
@@ -215,7 +217,7 @@ export function fileConfigFromPairs(pairs: Record<string, unknown>): FileConfig 
 }
 
 export function readConfigFile(file: string): FileConfig {
-  const text = readFileSync(file, "utf8");
+  const text = decodeConfigText(readFileSync(file));
   const ext = path.extname(file).toLowerCase();
   if (ext === ".json" || (ext !== ".env" && text.trim().startsWith("{"))) {
     let parsed: unknown;
@@ -337,17 +339,37 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
   const defaultModel = values["default-model"] ?? envString(env, "GROKCODE_DEFAULT_MODEL") ?? file.defaultModel;
 
   if (values.spawn && values["no-spawn"]) throw new Error("Pass only one of --spawn and --no-spawn.");
-  let opencodeMode =
-    asMode(values["opencode-mode"]) ??
-    asMode(envString(env, "GROKCODE_OPENCODE_MODE")) ??
-    file.opencodeMode;
-  const onForeign = asForeign(values["on-foreign"]) ?? asForeign(envString(env, "GROKCODE_OPENCODE_ON_FOREIGN")) ?? file.opencodeOnForeign;
-  if (values["no-spawn"]) opencodeMode = "attach";
-  else if (values.spawn) opencodeMode = "spawn";
-  else if (!opencodeMode) {
-    const spawnOff = env.GROKCODE_SPAWN === "0" || (env.GROKCODE_SPAWN !== "1" && file.spawn === false);
-    opencodeMode = spawnOff || opencodeUrl ? "attach" : "auto";
+  const envMode = asMode(envString(env, "GROKCODE_OPENCODE_MODE"));
+  const flagMode = asMode(values["opencode-mode"]);
+  let opencodeMode: OpenCodeMode;
+  let opencodeModeSource: string;
+  if (values["no-spawn"]) {
+    opencodeMode = "attach";
+    opencodeModeSource = "flag --no-spawn";
+  } else if (values.spawn) {
+    opencodeMode = "spawn";
+    opencodeModeSource = "flag --spawn";
+  } else if (flagMode) {
+    opencodeMode = flagMode;
+    opencodeModeSource = "flag --opencode-mode";
+  } else if (file.opencodeMode) {
+    opencodeMode = file.opencodeMode;
+    const from = loadedFrom[loadedFrom.length - 1] ?? "config file";
+    opencodeModeSource =
+      envMode && envMode !== file.opencodeMode
+        ? `config file ${from}; ignoring environment GROKCODE_OPENCODE_MODE=${envMode}`
+        : `config file ${from}`;
+  } else if (envMode) {
+    opencodeMode = envMode;
+    opencodeModeSource = "environment GROKCODE_OPENCODE_MODE";
+  } else if (env.GROKCODE_SPAWN === "1" || (env.GROKCODE_SPAWN !== "0" && file.spawn === true)) {
+    opencodeMode = "spawn";
+    opencodeModeSource = env.GROKCODE_SPAWN === "1" ? "environment GROKCODE_SPAWN" : "config file spawn";
+  } else {
+    opencodeMode = "attach";
+    opencodeModeSource = "default";
   }
+  const onForeign = asForeign(values["on-foreign"]) ?? asForeign(envString(env, "GROKCODE_OPENCODE_ON_FOREIGN")) ?? file.opencodeOnForeign;
 
   const configDir = loadedFrom[0] ? path.dirname(loadedFrom[0]) : defaultConfigDir(env);
 
@@ -360,6 +382,7 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
     ...(opencodeUrl ? { opencodeUrl } : {}),
     spawn: opencodeMode !== "attach",
     opencodeMode,
+    opencodeModeSource,
     ...(onForeign ? { opencodeOnForeign: onForeign } : {}),
     opencodeBin: values["opencode-bin"] ?? envString(env, "GROKCODE_OPENCODE_BIN") ?? file.opencodeBin ?? "opencode",
     opencodeHostname: values["opencode-hostname"] ?? file.opencodeHostname ?? "127.0.0.1",

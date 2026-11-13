@@ -1,6 +1,23 @@
 import { basicAuthHeader } from "./auth.js";
 import { GrokcodeError } from "./errors.js";
+import {
+  DEFAULT_LIST_LIMIT,
+  messageIdOf,
+  projectMessageList,
+  readMessage,
+  summarizeSession as buildSessionSummary,
+  toMessageView,
+  type MessageListOptions,
+  type MessageListResult,
+  type MessagePage,
+  type MessageReadOptions,
+  type MessageView,
+  type SessionState,
+} from "./messages.js";
 import { assertId, optionalString } from "./protocol.js";
+
+export type { MessageListOptions, MessageListResult, MessagePage, MessageReadOptions, MessageView, SessionState };
+export { toMessageView };
 
 export type ApiGeneration = "v1" | "v2";
 
@@ -42,13 +59,6 @@ export interface SessionView {
   activity: "idle" | "busy" | "retry" | "unknown";
   raw: unknown;
   status?: unknown;
-}
-
-export interface MessageView {
-  id?: string;
-  role?: string;
-  text: string;
-  raw: unknown;
 }
 
 export interface PromptAccepted {
@@ -172,39 +182,6 @@ function pickString(value: unknown, keys: string[]): string | undefined {
   return undefined;
 }
 
-function textFromParts(parts: unknown): string {
-  if (!Array.isArray(parts)) return "";
-  const chunks: string[] = [];
-  for (const part of parts) {
-    if (!isRecord(part)) continue;
-    if (typeof part.text === "string") chunks.push(part.text);
-    else if (typeof part.content === "string") chunks.push(part.content);
-    else if (part.type === "tool" || part.type === "tool-invocation" || part.type === "tool-call") {
-      const name = pickString(part, ["tool", "name"]) ?? "tool";
-      chunks.push(`[${name}]`);
-    }
-  }
-  return chunks.join("\n").trim();
-}
-
-export function toMessageView(raw: unknown): MessageView {
-  if (!isRecord(raw)) return { text: "", raw };
-  const info = isRecord(raw.info) ? raw.info : raw;
-  const id = pickString(info, ["id", "messageID"]);
-  const role = pickString(info, ["role", "type"]);
-  let text = "";
-  if (typeof raw.text === "string") text = raw.text;
-  else if (typeof info.text === "string") text = info.text;
-  else text = textFromParts(raw.parts ?? info.parts);
-  if (!text && typeof raw.content === "string") text = raw.content;
-  return {
-    ...(id ? { id } : {}),
-    ...(role ? { role } : {}),
-    text,
-    raw,
-  };
-}
-
 function toSessionSummary(raw: unknown): SessionSummary | undefined {
   if (!isRecord(raw)) return undefined;
   const id = pickString(raw, ["id", "sessionID"]);
@@ -228,6 +205,29 @@ function asArray(body: unknown): unknown[] {
   if (isRecord(data) && Array.isArray(data.items)) return data.items;
   if (isRecord(body) && Array.isArray(body.items)) return body.items;
   return [];
+}
+
+function messageArray(body: unknown): unknown[] {
+  const items = asArray(body);
+  if (items.length > 0) return items;
+  const data = unwrapData(body);
+  if (isRecord(data) && Array.isArray(data.messages)) return data.messages;
+  if (isRecord(body) && Array.isArray(body.messages)) return body.messages;
+  return items;
+}
+
+function dedupeMessages(raws: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  const out: unknown[] = [];
+  for (const raw of raws) {
+    const id = messageIdOf(raw);
+    if (id) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    out.push(raw);
+  }
+  return out;
 }
 
 export function sessionIsActive(activeBody: unknown, sessionId: string): boolean {
@@ -564,16 +564,97 @@ export class OpenCodeClient {
     return { sessionId, accepted: true, raw: res.body ?? { status: res.status } };
   }
 
-  async getMessages(sessionId: string, limit?: number): Promise<MessageView[]> {
+  async getMessages(sessionId: string, opts?: number | MessageListOptions): Promise<MessageView[]> {
+    return (await this.listMessages(sessionId, opts)).messages;
+  }
+
+  async listMessages(sessionId: string, opts?: number | MessageListOptions): Promise<MessageListResult> {
+    const options: MessageListOptions = typeof opts === "number" ? { limit: opts } : { ...opts };
+    const order = options.order === "asc" ? "asc" : "desc";
+    const count = options.tail ?? options.limit ?? DEFAULT_LIST_LIMIT;
+    const wantNewest = options.tail != null || order === "desc";
+    const page = await this.fetchMessages(sessionId, {
+      limit: count,
+      order: wantNewest ? "desc" : "asc",
+    });
+    const listed = projectMessageList(page, { ...options, order });
+    if (wantNewest || this.api === "v1") return listed;
+    const newest = await this.fetchMessages(sessionId, { limit: 5, order: "desc", type: "assistant" });
+    const latest = projectMessageList(newest, {
+      order: "desc",
+      limit: 5,
+      includeReasoning: options.includeReasoning,
+      includeToolOutput: options.includeToolOutput,
+    }).latest;
+    return latest ? { ...listed, latest } : listed;
+  }
+
+  async getMessage(sessionId: string, messageId: string, opts?: MessageReadOptions): Promise<MessagePage> {
+    return readMessage(await this.fetchMessage(sessionId, messageId), opts ?? {});
+  }
+
+  async summarizeSession(session: SessionView): Promise<SessionState> {
+    const assistants = await this.fetchMessages(session.id, {
+      limit: 20,
+      order: "desc",
+      ...(this.api === "v2" ? { type: "assistant" } : {}),
+    });
+    const recent =
+      this.api === "v2" ? await this.fetchMessages(session.id, { limit: 10, order: "desc" }) : assistants;
+    return buildSessionSummary(session, dedupeMessages([...assistants, ...recent]));
+  }
+
+  private async fetchMessages(
+    sessionId: string,
+    query: { limit?: number; order?: "asc" | "desc"; type?: string },
+  ): Promise<unknown[]> {
+    const run = (next: { limit?: number; order?: "asc" | "desc"; type?: string }) => this.fetchMessagePage(sessionId, next);
+    try {
+      return await run(query);
+    } catch (err) {
+      if (this.api === "v2" && query.type && err instanceof OpenCodeError && (err.status === 400 || err.status === 422)) {
+        return run({ limit: query.limit, order: query.order });
+      }
+      throw err;
+    }
+  }
+
+  private async fetchMessagePage(
+    sessionId: string,
+    query: { limit?: number; order?: "asc" | "desc"; type?: string },
+  ): Promise<unknown[]> {
     const id = assertId(sessionId, "sessionId");
-    const query: Record<string, string | undefined> = { order: "asc" };
-    if (limit) query.limit = String(limit);
+    const params: Record<string, string | undefined> = {};
+    if (this.api === "v2") {
+      if (query.order) params.order = query.order;
+      if (query.limit) params.limit = String(query.limit);
+      if (query.type) params.type = query.type;
+    }
     const res = await this.request(
       "GET",
       this.api === "v2" ? `/api/session/${encodeURIComponent(id)}/message` : `/session/${encodeURIComponent(id)}/message`,
-      { query },
+      { query: params },
     );
-    return asArray(res.body).map(toMessageView);
+    return messageArray(res.body);
+  }
+
+  private async fetchMessage(sessionId: string, messageId: string): Promise<unknown> {
+    const id = assertId(sessionId, "sessionId");
+    const mid = assertId(messageId, "messageId");
+    const path =
+      this.api === "v2"
+        ? `/api/session/${encodeURIComponent(id)}/message/${encodeURIComponent(mid)}`
+        : `/session/${encodeURIComponent(id)}/message/${encodeURIComponent(mid)}`;
+    try {
+      const res = await this.request("GET", path);
+      return unwrapData(res.body) ?? res.body;
+    } catch (err) {
+      if (!(err instanceof OpenCodeError) || err.status !== 404) throw err;
+      const all = await this.fetchMessages(sessionId, {});
+      const found = all.find((item) => messageIdOf(item) === mid);
+      if (!found) throw err;
+      return found;
+    }
   }
 
   async getSession(sessionId: string): Promise<SessionView> {

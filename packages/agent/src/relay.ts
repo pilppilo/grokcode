@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import {
   PROTOCOL_VERSION,
   encodeMessage,
+  encodeResultFrames,
   errorCode,
   errorMessage,
   parseMessage,
@@ -124,7 +125,7 @@ export function runRelayConnection(options: RelayConnectionOptions): Promise<voi
       if (message.type !== "rpc") return;
       try {
         const data = await options.execute(message.op, message.params);
-        socket.send(encodeMessage({ type: "result", id: message.id, ok: true, data }));
+        for (const frame of encodeResultFrames(message.id, data)) socket.send(frame);
       } catch (err) {
         socket.send(
           encodeMessage({

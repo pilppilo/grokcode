@@ -12,7 +12,7 @@ export {
 export type { MachineTokenMap } from "./auth.js";
 export { GrokcodeError, HubError, ToolError, errorCode, errorMessage } from "./errors.js";
 export { executeOp } from "./executor.js";
-export type { ExecutorContext } from "./executor.js";
+export type { ExecutorContext, OpenCodeControl, OpenCodeStatus } from "./executor.js";
 export { RelayHub } from "./hub.js";
 export type { MachineInfo, RelayHubOptions, SocketLike } from "./hub.js";
 export {
@@ -36,6 +36,23 @@ export {
   toMessageView,
   unwrapData,
 } from "./opencode.js";
+export {
+  parseToolOutputMode,
+  projectMessage,
+  projectMessageList,
+  readMessage,
+  summarizeSession,
+  truncateKeepEnd,
+} from "./messages.js";
+export type {
+  LatestAssistant,
+  MessageListResult,
+  MessagePage,
+  MessageReadOptions,
+  PartView,
+  SessionState,
+  ToolCallView,
+} from "./messages.js";
 export type {
   ApiGeneration,
   DiffView,
@@ -57,13 +74,16 @@ export { assertDirectoryAllowed, detectPlatform, directoryAllowed, normalizeDire
 export type { PathPlatform } from "./paths.js";
 export {
   ID_PATTERN,
+  MAX_FRAME,
   OPS,
   PROTOCOL_VERSION,
   asRecord,
   assertId,
   encodeMessage,
+  encodeResultFrames,
   isOpName,
   optionalString,
+  parseChunkedResult,
   parseMessage,
   requiredString,
 } from "./protocol.js";

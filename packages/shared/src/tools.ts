@@ -34,6 +34,30 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: "object", properties: { machine }, required: [] },
   },
   {
+    name: "opencode_status",
+    description:
+      "Read whether opencode serve is reachable on this machine. Returns reachable, url, version, and pid when one is known. Does not start or stop OpenCode.",
+    op: "opencode_status",
+    inputSchema: { type: "object", properties: { machine }, required: [] },
+  },
+  {
+    name: "start_opencode",
+    description:
+      "Start opencode serve on this machine's configured host and port. only call when the user explicitly asks to open/start OpenCode. If a server is already reachable, return its status and do not start another. The process is detached: the agent will not stop it on exit. There is no stop or restart tool.",
+    op: "start_opencode",
+    inputSchema: {
+      type: "object",
+      properties: {
+        machine,
+        directory: {
+          type: "string",
+          description: "Optional absolute working directory for the new server. Ignored when a server is already reachable.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "list_projects",
     description: "List projects known to OpenCode on a machine.",
     op: "list_projects",
@@ -73,7 +97,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "send_prompt",
     description:
-      "Send a user prompt to a session. OpenCode v2 admits the prompt and runs it in the background; v1 uses prompt_async. Default is async: the call returns as soon as the prompt is accepted. Set wait=true to poll until the session is idle, needs permission, or the sync budget (about 20s) runs out — then poll get_session / get_messages. Do not expect this tool to block for a multi-minute agent turn.",
+      "Send a user prompt to a session. OpenCode v2 admits the prompt and runs it in the background; v1 uses prompt_async. Default is async: the call returns as soon as the prompt is accepted. Set wait=true to poll until the session is idle, needs permission, or the sync budget (about 20s) runs out — then poll get_session_summary or get_messages. Do not expect this tool to block for a multi-minute agent turn.",
     op: "send_prompt",
     inputSchema: {
       type: "object",
@@ -97,7 +121,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "wait_session",
     description:
-      "Poll a session until it is idle, a permission is pending, or the sync budget expires. Use after send_prompt wait=false. Returns status running when the budget expires; call again or use get_messages.",
+      "Poll a session until it is idle, a permission is pending, or the sync budget expires. Use after send_prompt wait=false. Returns status running when the budget expires; call again or use get_session_summary.",
     op: "get_session",
     inputSchema: {
       type: "object",
@@ -111,17 +135,84 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "get_messages",
-    description: "List messages in a session. Text is extracted from v1 parts and v2 message bodies. Large payloads are truncated.",
+    description:
+      "List messages in a session, newest first by default. Each assistant message leads with its final text, then a compact tool list (name, short input, status, summarized output). Reasoning is omitted unless includeReasoning is true. If text must be cut, the end is kept and the cut is marked. Use get_message to read one long message in pages, and get_session_summary for the latest answer alone.",
     op: "get_messages",
     inputSchema: {
       type: "object",
       properties: {
         machine,
         sessionId,
-        limit: { type: "integer", minimum: 1, maximum: 200 },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 200,
+          description: "Maximum messages. With order=desc (the default) these are the newest. Default 30.",
+        },
+        tail: {
+          type: "integer",
+          minimum: 1,
+          maximum: 200,
+          description: "Newest N messages. They are still ordered by `order`. Same as last.",
+        },
+        last: { type: "integer", minimum: 1, maximum: 200, description: "Alias of tail." },
+        order: {
+          type: "string",
+          enum: ["desc", "asc"],
+          description: "desc (default) is newest first. asc is oldest first.",
+        },
+        includeReasoning: {
+          type: "boolean",
+          description: "Include reasoning text. Default false. A long reasoning block keeps its end and marks the cut.",
+        },
+        includeToolOutput: {
+          type: "string",
+          enum: ["summary", "full", "none"],
+          description: "summary (default) keeps the end of each tool output. full keeps a longer end. none omits output text.",
+        },
       },
       required: ["sessionId"],
     },
+  },
+  {
+    name: "get_message",
+    description:
+      "Read one message by id, for either OpenCode v2 content parts or v1 info/parts. Final text defaults to its ending when it is longer than maxChars. Page parts with partOffset and partLimit (the default page is the last parts). Page characters with offset and maxChars. Pass offset 0 to start at the beginning. Omitted ranges are marked.",
+    op: "get_message",
+    inputSchema: {
+      type: "object",
+      properties: {
+        machine,
+        sessionId,
+        messageId: { type: "string", description: "Message id from get_messages or get_session_summary." },
+        partOffset: {
+          type: "integer",
+          minimum: 0,
+          description: "Index into the filtered part list. Default is the last page of parts.",
+        },
+        partLimit: { type: "integer", minimum: 1, maximum: 100, description: "Parts per page. Default 20." },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description: "Character offset. Omit it to show the end of the text. 0 starts at the beginning.",
+        },
+        maxChars: { type: "integer", minimum: 1, maximum: 60000, description: "Character window. Default 16000." },
+        includeReasoning: { type: "boolean", description: "Include reasoning parts. Default false." },
+        includeToolOutput: {
+          type: "string",
+          enum: ["summary", "full", "none"],
+          description: "Default full, windowed by offset and maxChars. summary keeps a short end of each output. none omits output text.",
+        },
+      },
+      required: ["sessionId", "messageId"],
+    },
+  },
+  {
+    name: "get_session_summary",
+    description:
+      "Latest state of a session: status (idle, busy, or retry), last activity time, the last assistant message's final text, its finish reason or error, and the last few tool calls. Use this after a long turn. The final text is kept in full up to a large cap; past that, the end is kept and the cut is marked.",
+    op: "get_session_summary",
+    inputSchema: { type: "object", properties: { machine, sessionId }, required: ["sessionId"] },
   },
   {
     name: "get_session",

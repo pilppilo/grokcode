@@ -1,8 +1,10 @@
 # grokcode agent launcher for Windows Task Scheduler (Windows PowerShell 5.1).
 # Installed to %USERPROFILE%\.config\grokcode\start-agent.ps1.
 # Reads launcher.json (node, agentDir, extraPath) from the same directory.
-# Loads agent.env into the process environment without overriding variables
-# that are already set, then keeps `node dist\cli.js` running.
+# Loads agent.env into the process environment, overriding stale values such
+# as GROKCODE_OPENCODE_MODE, then keeps `node dist\cli.js` running with that
+# environment copied explicitly (Windows PowerShell 5.1 Start-Process can
+# otherwise keep the environment from before those assignments).
 
 $ErrorActionPreference = "Stop"
 
@@ -36,14 +38,41 @@ function Resolve-NodeExe([string]$Preferred) {
   throw "node.exe was not found. Install Node.js 20 or newer and re-run the installer."
 }
 
+function Read-AgentEnvText([string]$path) {
+  $bytes = [System.IO.File]::ReadAllBytes($path)
+  if ($bytes.Length -ge 2 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254) {
+    return [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+  }
+  if ($bytes.Length -ge 2 -and $bytes[0] -eq 254 -and $bytes[1] -eq 255) {
+    return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes, 2, $bytes.Length - 2)
+  }
+  if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) {
+    return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+  }
+  $zeros = 0
+  $n = [Math]::Min($bytes.Length, 64)
+  for ($i = 1; $i -lt $n; $i += 2) {
+    if ($bytes[$i] -eq 0) { $zeros++ }
+  }
+  if ($zeros -ge 4) {
+    return [System.Text.Encoding]::Unicode.GetString($bytes)
+  }
+  return [System.Text.Encoding]::Default.GetString($bytes)
+}
+
 function Import-AgentEnv([string]$path) {
   if (-not (Test-Path $path)) { return }
-  Get-Content -Path $path | ForEach-Object {
-    $line = $_.Trim()
-    if ($line -eq "" -or $line.StartsWith("#")) { return }
+  # The file is the installed config. Override a stale process variable such as
+  # GROKCODE_OPENCODE_MODE=auto left by an older installer or user environment.
+  $text = Read-AgentEnvText $path
+  foreach ($raw in ($text -split "\r?\n")) {
+    $line = $raw.Trim()
+    if ($line -eq "" -or $line.StartsWith("#")) { continue }
     if ($line.StartsWith("export ")) { $line = $line.Substring(7).Trim() }
+    $hash = $line.IndexOf(" #")
+    if ($hash -gt 0) { $line = $line.Substring(0, $hash).Trim() }
     $eq = $line.IndexOf("=")
-    if ($eq -lt 1) { return }
+    if ($eq -lt 1) { continue }
     $name = $line.Substring(0, $eq).Trim()
     $value = $line.Substring($eq + 1).Trim()
     if ($value.Length -ge 2) {
@@ -53,10 +82,39 @@ function Import-AgentEnv([string]$path) {
         $value = $value.Substring(1, $value.Length - 2)
       }
     }
-    $existing = [Environment]::GetEnvironmentVariable($name, "Process")
-    if ($existing) { return }
     Set-Item -Path "Env:$name" -Value $value
+    if ($name -eq "GROKCODE_OPENCODE_MODE") {
+      Remove-Item Env:GROKCODE_SPAWN -ErrorAction SilentlyContinue
+    }
   }
+}
+
+function Start-NodeAgent([string]$nodeExe, [string]$agentDir, [string]$outLog, [string]$errLog) {
+  # Start-Process in Windows PowerShell 5.1 can keep the environment from
+  # before this script's $env: assignments. Copy the process environment
+  # explicitly after Import-AgentEnv so agent.env wins.
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $nodeExe
+  $psi.Arguments = "dist\cli.js"
+  $psi.WorkingDirectory = $agentDir
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $vars = [Environment]::GetEnvironmentVariables("Process")
+  foreach ($key in @($vars.Keys)) {
+    $psi.EnvironmentVariables[[string]$key] = [string]$vars[$key]
+  }
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $stdout = $proc.StandardOutput.ReadToEndAsync()
+  $stderr = $proc.StandardError.ReadToEndAsync()
+  $proc.WaitForExit()
+  $utf8 = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::AppendAllText($outLog, $stdout.Result, $utf8)
+  [System.IO.File]::AppendAllText($errLog, $stderr.Result, $utf8)
+  return $proc.ExitCode
 }
 
 function Rotate-Log([string]$path) {
@@ -100,9 +158,8 @@ while ($true) {
   Rotate-Log $errLog
   $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   Add-LogLine $log "$stamp starting agent"
-  $proc = Start-Process -FilePath $nodeExe -ArgumentList "dist\cli.js" -WorkingDirectory $agentDir -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WindowStyle Hidden -PassThru -Wait
-  $code = 1
-  if ($proc -and $null -ne $proc.ExitCode) { $code = [int]$proc.ExitCode }
+  # Wait until node exits. OpenCode is not a child of this process.
+  $code = Start-NodeAgent $nodeExe $agentDir $outLog $errLog
   $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   Add-LogLine $log "$stamp agent exited $code"
   Start-Sleep -Seconds 10
