@@ -337,12 +337,29 @@ export async function ensureOpenCode(req: EnsureRequest): Promise<EnsuredOpenCod
     recordAlive: deps.alive(recordPid),
     ...(recordProbe ? { recordProbe } : {}),
   });
+  if (req.mode === "attach") {
+    if (action.type === "fail") throw new Error(action.message);
+    if (action.type !== "attach" && action.type !== "wait") {
+      throw new Error(`OpenCode mode is attach; refusing to ${action.type} a server.`);
+    }
+    req.log(action.message);
+    if (action.type === "attach" && !action.owned && !record?.detached) deps.clearPidFile();
+    const baseUrl =
+      req.attachUrl && action.host === req.host && action.port === req.port
+        ? req.attachUrl
+        : origin(action.host, action.port);
+    return {
+      baseUrl,
+      password: () => req.password,
+      owned: false,
+      stop: async () => {},
+    };
+  }
   if (action.type === "fail") throw new Error(action.message);
   if (action.type === "wait") {
     req.log(action.message);
-    const baseUrl = req.attachUrl ?? origin(action.host, action.port);
     return {
-      baseUrl,
+      baseUrl: req.attachUrl ?? origin(action.host, action.port),
       password: () => req.password,
       owned: false,
       stop: async () => {},

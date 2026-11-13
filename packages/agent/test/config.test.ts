@@ -145,4 +145,42 @@ test("default model and opencode mode are validated", () => {
   assert.equal(opted.spawn, true);
   const spawned = loadConfig(["--relay", "wss://example.test/agent", "--token", TOKEN, "--spawn"], { HOME: home });
   assert.equal(spawned.opencodeMode, "spawn");
+  assert.equal(config.opencodeModeSource, "default");
+});
+
+test("agent.env attach wins over a stale environment mode and GROKCODE_SPAWN, including UTF-16 CRLF", () => {
+  const home = tempHome();
+  const dir = path.join(home, ".config", "grokcode");
+  mkdirSync(dir, { recursive: true });
+  const body = [
+    "GROKCODE_MACHINE_NAME=desktop",
+    "GROKCODE_RELAY_URL=wss://example.test/agent",
+    "GROKCODE_MACHINE_TOKEN=" + TOKEN,
+    "OPENCODE_PASSWORD=secret-password",
+    "GROKCODE_DEFAULT_MODEL=opencode-go/deepseek-v4.1-flash",
+    "GROKCODE_OPENCODE_MODE=attach",
+    "",
+  ].join("\r\n");
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(body, "utf16le")]);
+  writeFileSync(path.join(dir, "agent.env"), utf16);
+  const config = loadConfig([], {
+    HOME: home,
+    USERPROFILE: home,
+    GROKCODE_OPENCODE_MODE: "auto",
+    GROKCODE_SPAWN: "1",
+  });
+  assert.equal(config.opencodeMode, "attach");
+  assert.equal(config.spawn, false);
+  assert.match(config.opencodeModeSource, /agent\.env/);
+  assert.match(config.opencodeModeSource, /ignoring environment GROKCODE_OPENCODE_MODE=auto/);
+  assert.equal(config.defaultModel, "opencode-go/deepseek-v4.1-flash");
+
+  writeFileSync(path.join(dir, "agent.env"), body, "utf8");
+  const crlf = loadConfig(["--opencode-mode", "spawn"], {
+    HOME: home,
+    USERPROFILE: home,
+    GROKCODE_OPENCODE_MODE: "attach",
+  });
+  assert.equal(crlf.opencodeMode, "spawn");
+  assert.equal(crlf.opencodeModeSource, "flag --opencode-mode");
 });

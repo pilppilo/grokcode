@@ -208,7 +208,7 @@ Direct mode on either Unix installer: add `--listen 127.0.0.1:8788 --mcp-token P
 
 ### What the agent reads
 
-On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.config/grokcode` (`%USERPROFILE%\.config\grokcode` on Windows). `--config` or `GROKCODE_CONFIG` selects a file or a directory instead. Real environment variables override the file. CLI flags override both. Tokens may live in either file.
+On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.config/grokcode` (`%USERPROFILE%\.config\grokcode` on Windows). `--config` or `GROKCODE_CONFIG` selects a file or a directory instead. Real environment variables override the file, except `GROKCODE_OPENCODE_MODE`: a mode written in the config file wins over a process environment value and over `GROKCODE_SPAWN`, so a stale `auto` cannot start a server the file set to `attach`. CLI flags (`--opencode-mode`, `--spawn`, `--no-spawn`) still win. Tokens may live in either file. The startup log names the mode and where it came from. Files written by Windows PowerShell 5.1 (`Set-Content` ANSI or Unicode, CRLF) are accepted.
 
 `GROKCODE_OPENCODE_MODE` is `attach` (default), `auto`, or `spawn`.
 
