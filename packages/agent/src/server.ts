@@ -10,6 +10,7 @@ import {
   handleMcpRequest,
   type MachineBackend,
   type OpenCodeClient,
+  type OpenCodeControl,
   type PathPlatform,
 } from "grokcode-shared";
 
@@ -24,6 +25,7 @@ export interface DirectServerOptions {
   maxSyncWaitMs?: number;
   defaultModel?: string;
   getApi: () => Promise<OpenCodeClient>;
+  opencodeControl?: OpenCodeControl;
 }
 
 export interface ListeningServer {
@@ -116,18 +118,18 @@ export function createDirectBackend(options: DirectServerOptions): MachineBacken
       if (machine !== options.name) {
         throw new Error(`This direct endpoint only serves ${options.name}.`);
       }
+      const shared = {
+        allowDirs: options.allowDirs,
+        platform: options.platform ?? detectPlatform(),
+        ...(options.home ? { home: options.home } : {}),
+        ...(options.defaultModel ? { defaultModel: options.defaultModel } : {}),
+        ...(options.opencodeControl ? { opencodeControl: options.opencodeControl } : {}),
+      };
+      if (op === "opencode_status" || op === "start_opencode") {
+        return executeOp(shared, op, params);
+      }
       const api = await options.getApi();
-      return executeOp(
-        {
-          api,
-          allowDirs: options.allowDirs,
-          platform: options.platform ?? detectPlatform(),
-          ...(options.home ? { home: options.home } : {}),
-          ...(options.defaultModel ? { defaultModel: options.defaultModel } : {}),
-        },
-        op,
-        params,
-      );
+      return executeOp({ ...shared, api }, op, params);
     },
   };
 }

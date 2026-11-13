@@ -17,7 +17,7 @@ param(
   [string]$McpToken = "",
   [string]$OpenCodePassword = "",
   [string]$DefaultModel = "",
-  [string]$OpenCodeMode = "auto",
+  [string]$OpenCodeMode = "attach",
   [switch]$SetOpenCodeModel,
   [string]$RepoUrl = "https://github.com/pilppilo/grokcode.git",
   [string]$InstallDir = "",

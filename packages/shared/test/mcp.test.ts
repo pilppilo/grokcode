@@ -60,9 +60,15 @@ test("initialize and tools/list advertise the shared surface", async () => {
   assert.equal(body.result.serverInfo.name, "grokcode");
 
   const list = await handleMcpRequest(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }), { backend: backend() });
-  const tools = ((await list.json()) as { result: { tools: { name: string }[] } }).result.tools.map((tool) => tool.name);
+  const listed = ((await list.json()) as { result: { tools: { name: string; description: string }[] } }).result.tools;
+  const tools = listed.map((tool) => tool.name);
+  const starter = listed.find((tool) => tool.name === "start_opencode");
+  assert.match(starter?.description ?? "", /only call when the user explicitly asks to open\/start OpenCode/);
+  assert.equal(listed.some((tool) => /stop_opencode|restart_opencode/.test(tool.name)), false);
   for (const name of [
     "list_machines",
+    "opencode_status",
+    "start_opencode",
     "start_session",
     "send_prompt",
     "get_messages",

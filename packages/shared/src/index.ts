@@ -12,7 +12,7 @@ export {
 export type { MachineTokenMap } from "./auth.js";
 export { GrokcodeError, HubError, ToolError, errorCode, errorMessage } from "./errors.js";
 export { executeOp } from "./executor.js";
-export type { ExecutorContext } from "./executor.js";
+export type { ExecutorContext, OpenCodeControl, OpenCodeStatus } from "./executor.js";
 export { RelayHub } from "./hub.js";
 export type { MachineInfo, RelayHubOptions, SocketLike } from "./hub.js";
 export {

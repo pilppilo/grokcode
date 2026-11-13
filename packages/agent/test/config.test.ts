@@ -129,12 +129,20 @@ test("default model and opencode mode are validated", () => {
   const config = loadConfig(["--relay", "wss://example.test/agent", "--token", TOKEN, "--default-model", "opencode-go/deepseek-v4.1-flash"], {
     HOME: home,
   });
-  assert.equal(config.opencodeMode, "auto");
-  assert.equal(config.spawn, true);
+  assert.equal(config.opencodeMode, "attach");
+  assert.equal(config.spawn, false);
   assert.doesNotThrow(() => validateConfig(config));
   assert.throws(
     () => validateConfig(loadConfig(["--relay", "wss://example.test/agent", "--token", TOKEN, "--default-model", "noslash"], {})),
     /provider\/model/,
   );
   assert.throws(() => loadConfig(["--opencode-mode", "sideways"], {}), /auto, attach, or spawn/);
+  const opted = loadConfig(
+    ["--relay", "wss://example.test/agent", "--token", TOKEN, "--opencode-mode", "auto"],
+    { HOME: home },
+  );
+  assert.equal(opted.opencodeMode, "auto");
+  assert.equal(opted.spawn, true);
+  const spawned = loadConfig(["--relay", "wss://example.test/agent", "--token", TOKEN, "--spawn"], { HOME: home });
+  assert.equal(spawned.opencodeMode, "spawn");
 });

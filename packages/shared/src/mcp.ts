@@ -45,6 +45,7 @@ const DEFAULT_INSTRUCTIONS = [
   "After an async prompt, poll get_session_summary or get_messages (newest first; the final text is kept and reasoning is omitted unless includeReasoning is true). Use get_message to page a long message. wait=true on send_prompt only blocks up to about 20 seconds, then returns status running.",
   "If list_pending_permissions or a wait result says needs_permission, call respond_permission (approve/once, always, or deny/reject) before expecting more output.",
   "abort interrupts the current turn.",
+  "Do not call start_opencode unless the user explicitly asks to open or start OpenCode. The agent does not start or stop OpenCode by itself. opencode_status only reports whether it is reachable.",
 ].join(" ");
 
 const realClock: Clock = {
