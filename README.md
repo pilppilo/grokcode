@@ -39,7 +39,7 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | --- | --- |
 | `list_machines` | PCs currently connected. |
 | `opencode_status` | Whether `opencode serve` is reachable, plus url, version, and pid when known. Does not start or stop anything. |
-| `start_opencode` | Start `opencode serve` on the configured host and port. Only call when the user explicitly asks to open/start OpenCode. If one is already reachable, returns its status and does not start another. The process is detached and is not stopped when the agent exits. |
+| `start_opencode` | Start `opencode serve` on the configured host and port. Only call when the user explicitly asks to open/start OpenCode. If one is already reachable, returns its status and does not start another. On Windows the `opencode` name is resolved to `opencode.exe` (or a `.cmd` run via `cmd.exe`), never a `.ps1` or extensionless shim. The process is detached and is not stopped when the agent exits. If it is still booting when the call returns, `reachable` is false and `started` is true. |
 | `server_info` | Health, API generation, version, and the agent's default model (`null` when unset). |
 | `list_projects` / `list_sessions` | Projects and sessions. |
 | `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). If `model` is omitted, the agent sends `GROKCODE_DEFAULT_MODEL` when that PC has one. |
