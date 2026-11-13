@@ -34,6 +34,30 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: "object", properties: { machine }, required: [] },
   },
   {
+    name: "opencode_status",
+    description:
+      "Read whether opencode serve is reachable on this machine. Returns reachable, url, version, and pid when one is known. Does not start or stop OpenCode.",
+    op: "opencode_status",
+    inputSchema: { type: "object", properties: { machine }, required: [] },
+  },
+  {
+    name: "start_opencode",
+    description:
+      "Start opencode serve on this machine's configured host and port. only call when the user explicitly asks to open/start OpenCode. If a server is already reachable, return its status and do not start another. The process is detached: the agent will not stop it on exit. There is no stop or restart tool.",
+    op: "start_opencode",
+    inputSchema: {
+      type: "object",
+      properties: {
+        machine,
+        directory: {
+          type: "string",
+          description: "Optional absolute working directory for the new server. Ignored when a server is already reachable.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "list_projects",
     description: "List projects known to OpenCode on a machine.",
     op: "list_projects",

@@ -57,7 +57,7 @@ Options:
   --listen <host:port>       Serve MCP over HTTP for Tailscale or a private network
   --mcp-token <token>        Bearer token for --listen (or GROKCODE_MCP_TOKEN)
   --opencode-url <url>       Attach to an existing server
-  --opencode-mode <mode>     spawn, attach, or auto (default auto)
+  --opencode-mode <mode>     attach (default), spawn, or auto
   --on-foreign <policy>      attach, replace, or next-port when a server is already running
   --spawn                    Own the OpenCode process (mode spawn)
   --no-spawn                 Never start opencode; only attach (mode attach)
@@ -345,8 +345,8 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
   if (values["no-spawn"]) opencodeMode = "attach";
   else if (values.spawn) opencodeMode = "spawn";
   else if (!opencodeMode) {
-    const spawnOff = env.GROKCODE_SPAWN === "0" || (env.GROKCODE_SPAWN !== "1" && file.spawn === false);
-    opencodeMode = spawnOff || opencodeUrl ? "attach" : "auto";
+    const spawnOn = env.GROKCODE_SPAWN === "1" || (env.GROKCODE_SPAWN !== "0" && file.spawn === true);
+    opencodeMode = spawnOn ? "spawn" : "attach";
   }
 
   const configDir = loadedFrom[0] ? path.dirname(loadedFrom[0]) : defaultConfigDir(env);

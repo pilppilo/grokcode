@@ -38,6 +38,8 @@ Every tool except `list_machines` accepts `machine`. In direct mode it defaults 
 | Tool | What it does |
 | --- | --- |
 | `list_machines` | PCs currently connected. |
+| `opencode_status` | Whether `opencode serve` is reachable, plus url, version, and pid when known. Does not start or stop anything. |
+| `start_opencode` | Start `opencode serve` on the configured host and port. Only call when the user explicitly asks to open/start OpenCode. If one is already reachable, returns its status and does not start another. The process is detached and is not stopped when the agent exits. |
 | `server_info` | Health, API generation, version, and the agent's default model (`null` when unset). |
 | `list_projects` / `list_sessions` | Projects and sessions. |
 | `start_session` | New session. `directory` must be absolute. Optional `agent`, `model` (`provider/model`). If `model` is omitted, the agent sends `GROKCODE_DEFAULT_MODEL` when that PC has one. |
@@ -208,13 +210,13 @@ Direct mode on either Unix installer: add `--listen 127.0.0.1:8788 --mcp-token P
 
 On every OS the agent loads, in order, `agent.json` then `agent.env` from `~/.config/grokcode` (`%USERPROFILE%\.config\grokcode` on Windows). `--config` or `GROKCODE_CONFIG` selects a file or a directory instead. Real environment variables override the file. CLI flags override both. Tokens may live in either file.
 
-`GROKCODE_OPENCODE_MODE` is `auto` (default), `attach`, or `spawn`.
+`GROKCODE_OPENCODE_MODE` is `attach` (default), `auto`, or `spawn`.
 
-* **auto** attaches when an OpenCode server is already listening and accepts `OPENCODE_PASSWORD`, and says so in the log, including that this agent did not start it and will not stop it. If the password is rejected, the agent starts its own server on another port. A server recorded in `opencode.pid` is reused, restarted if it dies, and stopped when the agent exits.
-* **attach** (`--no-spawn`) never starts or kills OpenCode. A rejected password is an error.
-* **spawn** (`--spawn`) owns the process. A foreign server on the port is replaced. Set `GROKCODE_OPENCODE_ON_FOREIGN=next-port` to move aside instead, or `attach` to keep a server that accepts the password.
+* **attach** (default, also `--no-spawn`) never starts, restarts, or kills OpenCode. If the server is down or rejects `OPENCODE_PASSWORD`, the agent stays up, tool calls report OpenCode unavailable, and it retries the connection with backoff (1s, 2s, … up to 30s). It does not stop a server on the way out, including one started earlier by `start_opencode`.
+* **auto** attaches when an OpenCode server is already listening and accepts `OPENCODE_PASSWORD`, and says so in the log, including that this agent did not start it and will not stop it. If the password is rejected, the agent starts its own server on another port. A server it is supervising is reused, restarted if it dies, and stopped when the agent exits. A server marked detached in `opencode.pid` is left alone.
+* **spawn** (`--spawn`) owns the process it launches. A foreign server on the port is replaced. Set `GROKCODE_OPENCODE_ON_FOREIGN=next-port` to move aside instead, or `attach` to keep a server that accepts the password.
 
-The process reconnects to the relay with backoff (1s, 2s, … up to 30s). `SIGINT` / `SIGTERM` stop the agent and any OpenCode process it spawned.
+The process reconnects to the relay with backoff (1s, 2s, … up to 30s). `SIGINT` / `SIGTERM` stop the agent. They stop an OpenCode process only when this run is supervising it (`auto` or `spawn`). `start_opencode` launches a detached process, so it survives an agent exit or crash and is not part of the agent's process tree.
 
 Foreground run, after `npm install` and `npm run build` in a checkout:
 
@@ -228,7 +230,7 @@ export OPENCODE_PASSWORD='<a long password>'
 node packages/agent/dist/cli.js --name laptop --relay wss://YOUR_WORKER.workers.dev/agent
 ```
 
-`opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops the process tree on exit.
+In `spawn` and `auto`, `opencode serve` is started with `shell` on Windows so an `opencode.cmd` shim works. The agent records the listener pid and stops that supervised process tree on exit. `start_opencode` is different: on Windows it uses `Start-Process` without `-Wait`, so `deploy/start-agent.ps1` does not hang and the server keeps running after the agent exits.
 
 ## Direct mode and Tailscale
 
@@ -265,7 +267,7 @@ npm test
 npm run typecheck
 ```
 
-Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
+Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, the default `attach` OpenCode mode, `start_opencode` idempotency and the rule that an agent exit does not kill a detached server, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
 
 Layout:
 

@@ -100,6 +100,9 @@ while ($true) {
   Rotate-Log $errLog
   $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   Add-LogLine $log "$stamp starting agent"
+  # -Wait returns when node exits. OpenCode is not a child of this process: the agent
+  # starts it only from start_opencode, via Start-Process without -Wait, so this wait
+  # does not hang and an agent exit does not stop that server.
   $proc = Start-Process -FilePath $nodeExe -ArgumentList "dist\cli.js" -WorkingDirectory $agentDir -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WindowStyle Hidden -PassThru -Wait
   $code = 1
   if ($proc -and $null -ne $proc.ExitCode) { $code = [int]$proc.ExitCode }

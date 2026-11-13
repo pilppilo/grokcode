@@ -4,18 +4,43 @@ import { OpenCodeClient, type FormView, type PermissionView, type ProjectInfo, t
 import { asRecord, assertId, isOpName, optionalString, requiredString, type OpName } from "./protocol.js";
 import { ToolError } from "./errors.js";
 
+export interface OpenCodeStatus {
+  reachable: boolean;
+  url: string;
+  version?: string;
+  api?: "v1" | "v2";
+  pid?: number;
+  /** True when this call started a server. False when one was already reachable. */
+  started?: boolean;
+}
+
+export interface OpenCodeControl {
+  status(): Promise<OpenCodeStatus>;
+  /** Start opencode serve only for an explicit start_opencode call. Must not stop it later. */
+  start(directory?: string): Promise<OpenCodeStatus>;
+}
+
 export interface ExecutorContext {
-  api: OpenCodeClient;
+  /** Absent when OpenCode is not reachable yet. */
+  api?: OpenCodeClient;
   allowDirs?: readonly string[];
   platform?: PathPlatform;
   home?: string;
   /** provider/model applied when start_session or send_prompt omits model. */
   defaultModel?: string;
+  opencodeControl?: OpenCodeControl;
 }
 
 function ctxOf(ctx: ExecutorContext) {
+  const api = ctx.api;
+  if (!api) {
+    throw new ToolError(
+      "OpenCode is unavailable. The agent keeps retrying and does not start a server on its own. Call start_opencode only when the user explicitly asks to open or start OpenCode.",
+      "opencode_unavailable",
+    );
+  }
   return {
-    api: ctx.api,
+    api,
     allowDirs: ctx.allowDirs ?? [],
     platform: ctx.platform ?? detectPlatform(),
     home: ctx.home ?? homedir(),
@@ -134,6 +159,9 @@ async function filterForms(
  */
 export async function executeOp(ctxIn: ExecutorContext, op: string, params: unknown): Promise<unknown> {
   if (!isOpName(op)) throw new ToolError(`Unknown op ${op}.`, "unknown_op");
+  if (op === "opencode_status" || op === "start_opencode") {
+    return runOpenCodeControl(ctxIn, op, params);
+  }
   const ctx = ctxOf(ctxIn);
   const p = asRecord(params);
   const guardDir = (directory: string | undefined) =>
@@ -292,6 +320,21 @@ export async function executeOp(ctxIn: ExecutorContext, op: string, params: unkn
     default:
       throw new ToolError(`Unknown op ${op}.`, "unknown_op");
   }
+}
+
+async function runOpenCodeControl(
+  ctx: ExecutorContext,
+  op: "opencode_status" | "start_opencode",
+  params: unknown,
+): Promise<OpenCodeStatus> {
+  const control = ctx.opencodeControl;
+  if (!control) throw new ToolError(`${op} is not available on this connection.`, "unsupported");
+  if (op === "opencode_status") return control.status();
+  const directory = optionalString(asRecord(params).directory);
+  if (directory) {
+    assertDirectoryAllowed(directory, ctx.allowDirs ?? [], ctx.platform ?? detectPlatform(), ctx.home ?? homedir());
+  }
+  return control.start(directory);
 }
 
 async function guardSession(

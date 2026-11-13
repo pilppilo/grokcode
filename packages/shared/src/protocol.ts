@@ -22,6 +22,8 @@ export const OPS = [
   "list_forms",
   "reply_form",
   "delete_session",
+  "opencode_status",
+  "start_opencode",
 ] as const;
 
 export type OpName = (typeof OPS)[number];

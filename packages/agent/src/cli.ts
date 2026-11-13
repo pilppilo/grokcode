@@ -7,13 +7,9 @@ import { HELP, loadConfig, parseListen, validateConfig, type AgentConfig } from 
 import { ensureOpenCode } from "./ownership.js";
 import { runRelayConnection } from "./relay.js";
 import { listenDirect } from "./server.js";
+import { createOpenCodeService } from "./service.js";
 import { probeOpenCode } from "./supervisor.js";
-import {
-  detectOpenCode,
-  executeOp,
-  type OpenCodeAuth,
-  type OpenCodeClient,
-} from "grokcode-shared";
+import { executeOp, type OpenCodeClient } from "grokcode-shared";
 
 const VERSION = "0.1.0";
 
@@ -90,35 +86,35 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
     return 1;
   }
 
-  const auth: OpenCodeAuth = {
+  const served = endpointOf(ensured.baseUrl, endpoint.host, endpoint.port);
+  const password = ensured.password();
+  const service = createOpenCodeService({
+    baseUrl: ensured.baseUrl,
+    host: served.host,
+    port: served.port,
+    command: config.opencodeBin,
     username: config.username,
-    ...(ensured.password() ? { password: ensured.password() } : {}),
-  };
-  const baseUrl = ensured.baseUrl;
+    ...(password ? { password } : {}),
+    env,
+    pidFile: path.join(config.configDir ?? ".grokcode", "opencode.pid"),
+    signal,
+    log: (line) => io.log(line),
+  });
+  service.watch();
   const stopChild = ensured.stop;
-
-  let apiPromise: Promise<OpenCodeClient> | undefined;
-  const getApi = () => {
-    if (!apiPromise) {
-      apiPromise = detectOpenCode({ baseUrl, auth, timeoutMs: 8000 }).catch((err) => {
-        apiPromise = undefined;
-        throw err;
-      });
-    }
-    return apiPromise;
-  };
+  const getApi = () => service.getClient();
 
   const execute = async (op: string, params: unknown) => {
+    const shared = {
+      allowDirs: config.allowDirs,
+      opencodeControl: service.control,
+      ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
+    };
+    if (op === "opencode_status" || op === "start_opencode") {
+      return executeOp(shared, op, params);
+    }
     const api = await getApi();
-    return executeOp(
-      {
-        api,
-        allowDirs: config.allowDirs,
-        ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
-      },
-      op,
-      params,
-    );
+    return executeOp({ ...shared, api }, op, params);
   };
 
   const closers: Array<() => Promise<void>> = [stopChild];
@@ -133,6 +129,7 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
       maxSyncWaitMs: config.maxSyncWaitMs,
       ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
       getApi,
+      opencodeControl: service.control,
     });
     io.log(`Direct MCP at ${listening.url}/mcp (Authorization: Bearer <mcp token>).`);
     closers.push(listening.close);
