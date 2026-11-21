@@ -145,6 +145,11 @@ test("an oauth access token can call the shell endpoint and the original /mcp st
     config,
   );
   const token = ((await traded.json()) as { access_token: string }).access_token;
+  const get = await handleRelayRequest(
+    new Request("https://relay.example/gemini/mcp", { headers: { authorization: `Bearer ${token}` } }),
+    { mcpToken: MCP, bridge: bridge(), oauth: config },
+  );
+  assert.equal(get.status, 405);
   const shell = await handleRelayRequest(
     new Request("https://relay.example/gemini/mcp", {
       method: "POST",

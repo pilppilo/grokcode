@@ -21,7 +21,7 @@ export interface Env {
    */
   PUBLIC_ORIGIN?: string;
   /**
-   * Exact redirect URIs, comma-separated. Configure before registering a client.
+   * Optional exact redirect URIs, comma-separated.
    */
   OAUTH_PINNED_REDIRECTS?: string;
 }

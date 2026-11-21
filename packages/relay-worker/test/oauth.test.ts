@@ -339,8 +339,8 @@ test("google sign-in issues a code only for the allowlisted owner", async () => 
 });
 
 test("google redirect paths are limited to /r/ and /a/ until an exact URI is pinned", () => {
-  assert.equal(redirectUriAllowed("https://oauth-redirect.googleusercontent.com/r/app"), false);
-  assert.equal(redirectUriAllowed("https://oauth-redirect.googleusercontent.com/a/app"), false);
+  assert.equal(redirectUriAllowed("https://oauth-redirect.googleusercontent.com/r/app"), true);
+  assert.equal(redirectUriAllowed("https://oauth-redirect.googleusercontent.com/a/app"), true);
   assert.equal(redirectUriAllowed("https://oauth-redirect.googleusercontent.com/steal"), false);
   assert.equal(redirectUriAllowed("https://oauth-redirect.googleusercontent.com/r/../x"), false);
   assert.equal(
@@ -557,7 +557,7 @@ test("dynamic registration is capped", async () => {
   assert.equal(second.status, 429);
 });
 
-test("registration and existing clients require configured redirect pins", async () => {
+test("loopback registration and existing loopback clients require configured redirect pins", async () => {
   const { config } = setup();
   const client = await register(config);
   delete config.pinnedRedirects;
@@ -570,4 +570,14 @@ test("registration and existing clients require configured redirect pins", async
   url.search = new URLSearchParams({ client_id: client.client_id, redirect_uri: REDIRECT, response_type: "code" }).toString();
   const response = await handleOAuthRequest(new Request(url), config);
   assert.equal((await response.json() as { error_description: string }).error_description, "redirect_uri is not registered.");
+});
+
+test("unpinned Gemini clients can register only on the production redirect origin", async () => {
+  const { config } = setup({ pinnedRedirects: [] });
+  await register(config, "https://oauth-redirect.googleusercontent.com/r/test-app");
+  for (const uri of [
+    "https://oauth-redirect.googleusercontent.com/other/test-app",
+    "https://oauth-redirect.googleusercontent.com:444/r/test-app",
+    "https://oauth-redirect-sandbox.googleusercontent.com/r/test-app",
+  ]) assert.equal(redirectUriAllowed(uri, []), false);
 });
