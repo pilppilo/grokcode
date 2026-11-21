@@ -105,6 +105,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
           numberArg(record.limit, "limit", 1, 100) ?? 20,
           ctx,
           spawnImpl,
+          record.staged === true,
         );
       case "shell_read_file": {
         const offset = numberArg(record.offset, "offset", 0, 50_000_000) ?? 0;

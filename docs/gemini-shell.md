@@ -206,7 +206,7 @@ Every tool takes `machine` except `list_machines`, which is required when more t
 | `get_job` / `poll_output` | Status and output for that job. Read-only. |
 | `read_file` / `list_dir` | Inside the roots. Reads support inclusive line ranges and default to 32 KiB per page. Directories return the first 500 sorted entries and report truncation. |
 | `search_files` | Literal text lookup with an optional filename glob. Skips hidden paths and symlinks. Read-only. |
-| `git_diff` / `git_log` | Staged changes and recent commit history. Read-only. |
+| `git_diff` / `git_log` | Unstaged changes by default, staged changes on request, and recent commit history. Read-only. |
 | `kill_job` | Cancel a running command on the selected machine. Destructive. |
 | `write_file` / `apply_patch` | Inside the roots. Unified diffs. Destructive. |
 | `git_status` | Fixed `git status --porcelain`. Read-only. |

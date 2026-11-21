@@ -225,12 +225,16 @@ const tools: ShellTool[] = [
   },
   {
     name: "git_diff",
-    description: "Read the staged Git diff. External diff, text conversion, and working-tree filters are disabled.",
+    description: "Read unstaged Git changes by default. Set staged to true to inspect staged changes. External diff, text conversion, and Git filters are disabled.",
     op: "shell_git_diff",
     annotations: readOnly,
     inputSchema: {
       type: "object",
-      properties: { machine, cwd: { type: "string", description: "Absolute repository directory inside the allowed roots." } },
+      properties: {
+        machine,
+        cwd: { type: "string", description: "Absolute repository directory inside the allowed roots." },
+        staged: { type: "boolean", description: "Inspect staged changes instead of unstaged changes. Defaults to false." },
+      },
       required: ["cwd"],
       additionalProperties: false,
     },
