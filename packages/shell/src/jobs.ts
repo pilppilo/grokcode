@@ -7,18 +7,19 @@ import type { SpawnFn, SpawnSpec } from "./spawn.js";
 
 export interface JobView {
   jobId: string;
-  status: "running" | "exited" | "timed_out";
+  status: "running" | "exited" | "timed_out" | "cancelled";
   exitCode: number | null;
   startedAt: number;
   finishedAt?: number;
   argv: string[];
   cwd: string;
   output: string;
+  nextOffset: number;
   truncated: boolean;
   timedOut: boolean;
 }
 
-interface Job extends JobView {
+interface Job extends Omit<JobView, "nextOffset"> {
   raw: string;
   kill: () => void;
   timer?: ReturnType<typeof setTimeout>;
@@ -78,23 +79,35 @@ export class JobTable {
       job.output = redact(job.raw);
     });
     this.jobs.set(job.jobId, job);
-    return this.view(job, false);
+    return this.view(job);
   }
 
   get(jobId: string): JobView {
-    return this.view(this.take(jobId), false);
+    return this.view(this.take(jobId));
+  }
+
+  cancel(jobId: string): JobView {
+    const job = this.take(jobId);
+    if (job.status === "running") {
+      job.kill();
+      if (job.timer) clearTimeout(job.timer);
+      job.status = "cancelled";
+      job.finishedAt = this.now();
+    }
+    return this.view(job);
   }
 
   poll(jobId: string, offset: number): { jobId: string; offset: number; nextOffset: number; output: string; done: boolean; exitCode: number | null; status: JobView["status"]; truncated: boolean } {
     const job = this.take(jobId);
     const text = job.output;
     const start = Math.max(0, Math.min(offset, text.length));
+    const end = outputEnd(text, start);
     return {
       jobId: job.jobId,
       offset: start,
-      nextOffset: text.length,
-      output: text.slice(start),
-      done: job.status !== "running",
+      nextOffset: end,
+      output: text.slice(start, end),
+      done: job.status !== "running" && end === text.length,
       exitCode: job.exitCode,
       status: job.status,
       truncated: job.truncated,
@@ -114,8 +127,8 @@ export class JobTable {
     return job;
   }
 
-  private view(job: Job, tail: boolean): JobView {
-    const output = tail && job.output.length > 32_000 ? job.output.slice(-32_000) : job.output;
+  private view(job: Job): JobView {
+    const end = outputEnd(job.output, 0);
     return {
       jobId: job.jobId,
       status: job.status,
@@ -124,7 +137,8 @@ export class JobTable {
       ...(job.finishedAt != null ? { finishedAt: job.finishedAt } : {}),
       argv: job.argv,
       cwd: job.cwd,
-      output,
+      output: job.output.slice(0, end),
+      nextOffset: end,
       truncated: job.truncated,
       timedOut: job.timedOut,
     };
@@ -138,4 +152,10 @@ export class JobTable {
     const oldest = finished[0];
     if (oldest) this.jobs.delete(oldest.jobId);
   }
+}
+
+function outputEnd(text: string, start: number): number {
+  const end = Math.min(text.length, start + 16_000);
+  const last = text.charCodeAt(end - 1);
+  return last >= 0xd800 && last <= 0xdbff && end < text.length ? end - 1 : end;
 }

@@ -135,7 +135,7 @@ File tools resolve the real path and refuse a symlink that lands outside the roo
 
 `run_command` is marked `destructiveHint`. `list_machines`, `get_machine_info`, `read_file`, `list_dir`, `git_status`, `get_job`, and `poll_output` are marked `readOnlyHint`. Gemini shows its confirmation card for the destructive tools. The PC does not ask again.
 
-`run_command` returns a job id. Poll `get_job` or `poll_output`. `wait: true` only blocks for about 20 seconds, same as the OpenCode admit-then-poll budget, so a Gemini or Cloudflare timeout does not have to cover a long process.
+`run_command` waits up to about 20 seconds by default. Use `wait: false` to return immediately with a job ID. Poll `get_job` for status, pass `nextOffset` to `poll_output` for the next page, or cancel a running command with `kill_job`.
 
 ## Add the custom app in Gemini
 
@@ -200,11 +200,14 @@ Every tool takes `machine` except `list_machines`, which is required when more t
 
 | Tool | Notes |
 | --- | --- |
-| `list_machines` | Connected agents. Read-only. |
-| `get_machine_info` | OS, shell, roots, allowlisted command names. Read-only. |
+| `list_machines` | Connected agents with OS and allowed roots when available. Read-only. |
+| `get_machine_info` | OS, shell, roots, allowlisted commands and subcommands. Read-only. |
 | `run_command` | `argv` plus absolute `cwd`. No shell unless `shell` is true and the policy allows it. Returns a job id. Destructive. |
 | `get_job` / `poll_output` | Status and output for that job. Read-only. |
-| `read_file` / `list_dir` | Inside the roots. Read-only. |
+| `read_file` / `list_dir` | Inside the roots. Reads support inclusive line ranges and default to 32 KiB per page. Directories return the first 500 sorted entries and report truncation. |
+| `search_files` | Literal text lookup with an optional filename glob. Skips hidden paths and symlinks. Read-only. |
+| `git_diff` / `git_log` | Staged changes and recent commit history. Read-only. |
+| `kill_job` | Cancel a running command on the selected machine. Destructive. |
 | `write_file` / `apply_patch` | Inside the roots. Unified diffs. Destructive. |
 | `git_status` | Fixed `git status --porcelain`. Read-only. |
 | `git_commit_push` | Named paths, branch allowlist, push only if `git.push` is true. Destructive. |

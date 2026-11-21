@@ -15,7 +15,7 @@
     }
   ],
   "git": {
-    "branches": ["main", "cursor/*"],
+    "branches": ["main", "codex/*"],
     "push": false
   },
   "limits": {
