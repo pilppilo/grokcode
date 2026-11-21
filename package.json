@@ -11,9 +11,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w grokcode-shared && npm run build -w grokcode-agent && npm run typecheck -w grokcode-relay",
-    "typecheck": "npm run typecheck -w grokcode-shared && npm run typecheck -w grokcode-agent && npm run typecheck -w grokcode-relay",
-    "test": "npm run build -w grokcode-shared && node --import tsx --test packages/shared/test/*.test.ts packages/agent/test/*.test.ts packages/relay-worker/test/*.test.ts"
+    "build": "npm run build -w grokcode-shared && npm run build -w grokcode-shell && npm run build -w grokcode-agent && npm run typecheck -w grokcode-relay",
+    "typecheck": "npm run typecheck -w grokcode-shared && npm run build -w grokcode-shared && npm run typecheck -w grokcode-shell && npm run build -w grokcode-shell && npm run typecheck -w grokcode-agent && npm run typecheck -w grokcode-relay",
+    "test": "npm run build -w grokcode-shared && npm run build -w grokcode-shell && node --import tsx --test packages/shared/test/*.test.ts packages/shell/test/*.test.ts packages/agent/test/*.test.ts packages/relay-worker/test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

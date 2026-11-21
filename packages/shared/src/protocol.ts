@@ -2,6 +2,24 @@ import { ToolError } from "./errors.js";
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Shell-bridge ops. They travel the same hub as OpenCode ops, but the agent
+ * executes them in grokcode-shell. They are not OpenCode slash commands.
+ */
+export const SHELL_OPS = [
+  "shell_info",
+  "shell_run",
+  "shell_job",
+  "shell_read_file",
+  "shell_list_dir",
+  "shell_write_file",
+  "shell_apply_patch",
+  "shell_git_status",
+  "shell_git_commit",
+] as const;
+
+export type ShellOpName = (typeof SHELL_OPS)[number];
+
 export const OPS = [
   "server_info",
   "list_projects",
@@ -24,12 +42,17 @@ export const OPS = [
   "delete_session",
   "opencode_status",
   "start_opencode",
+  ...SHELL_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number];
 
 export function isOpName(value: string): value is OpName {
   return (OPS as readonly string[]).includes(value);
+}
+
+export function isShellOp(value: string): value is ShellOpName {
+  return (SHELL_OPS as readonly string[]).includes(value);
 }
 
 export interface HelloMessage {

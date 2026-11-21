@@ -1,0 +1,35 @@
+{
+  "name": "grokcode-shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Policy-gated shell and file tools for Gemini custom apps and the Antigravity CLI.",
+  "bin": {
+    "grokcode-shell": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js"
+    }
+  },
+  "files": [
+    "dist",
+    "policy.example.json",
+    "mcp_config.example.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "grokcode-shared": "0.1.0"
+  }
+}

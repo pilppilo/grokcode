@@ -161,6 +161,14 @@ write_env=(
 "${write_env[@]}" node "$repo/packages/agent/dist/write-config.js" --out "$env_file"
 chmod 600 "$env_file"
 
+example="$repo/packages/shell/policy.example.json"
+if [[ -f "$example" && ! -f "$cfg_dir/policy.json" ]]; then
+  cp "$example" "$cfg_dir/policy.example.json"
+  chmod 600 "$cfg_dir/policy.example.json"
+  echo "Shell policy example: $cfg_dir/policy.example.json"
+  echo "Copy it to $cfg_dir/policy.json and set roots before Gemini or Antigravity can run commands."
+fi
+
 if [[ "$SET_OPENCODE_MODEL" -eq 1 ]]; then
   node "$repo/packages/agent/dist/opencode-config.js" --model "$MODEL" --home "$HOME"
 fi

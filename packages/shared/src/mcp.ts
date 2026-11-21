@@ -1,7 +1,7 @@
 import { errorCode, errorMessage, GrokcodeError, ToolError } from "./errors.js";
 import type { MachineInfo } from "./hub.js";
 import { truncateKeepEnd } from "./messages.js";
-import { TOOLS, toolByName } from "./tools.js";
+import { TOOLS, toolByName, type ToolDef } from "./tools.js";
 
 export const SERVER_NAME = "grokcode";
 export const SERVER_VERSION = "0.1.0";
@@ -30,6 +30,12 @@ export interface McpHandlerOptions {
   pollMs?: number;
   clock?: Clock;
   instructions?: string;
+  /** Replaces the OpenCode tool list. The shell bridge passes its own tools. */
+  tools?: readonly ToolDef[];
+  /** Replaces the OpenCode tool dispatcher. */
+  callTool?: (name: string, args: unknown) => Promise<unknown>;
+  serverName?: string;
+  serverVersion?: string;
   /**
    * Reject browser Origin values that are not this host or loopback.
    * Direct mode wants this (DNS rebinding). The public relay does not:
@@ -193,6 +199,7 @@ async function callTool(
   name: string,
   args: unknown,
 ): Promise<unknown> {
+  if (options.callTool) return options.callTool(name, args);
   const tool = toolByName(name);
   if (!tool) throw new ToolError(`Unknown tool ${name}.`, "unknown_tool");
   const record = isRecord(args) ? args : {};
@@ -254,17 +261,22 @@ function handleRpc(message: JsonRpc, options: McpHandlerOptions): Promise<unknow
     return rpcResult(id, {
       protocolVersion: protocolVersion(requested),
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+      serverInfo: {
+        name: options.serverName ?? SERVER_NAME,
+        version: options.serverVersion ?? SERVER_VERSION,
+      },
       instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
     });
   }
   if (method === "ping") return rpcResult(id, {});
   if (method === "tools/list") {
+    const tools = options.tools ?? TOOLS;
     return rpcResult(id, {
-      tools: TOOLS.map((tool) => ({
+      tools: tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema,
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
       })),
     });
   }

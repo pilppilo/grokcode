@@ -14,7 +14,7 @@ Grok Bot  --HTTPS + bearer-->  Cloudflare Worker  --WebSocket--  agent on a PC  
 Grok Bot  --HTTPS + bearer-->  agent on a PC (Tailscale/Funnel/LAN)  -->  opencode serve
 ```
 
-The MCP tool list is the same in both modes.
+The MCP tool list is the same in both modes. A second endpoint, `/gemini/mcp`, exposes shell and file tools for the Gemini app and the Antigravity CLI. See [Gemini and Antigravity](docs/gemini-shell.md).
 
 ## OpenCode API this talks to
 
@@ -276,6 +276,10 @@ You can also bind the agent to the Tailscale IP (`--listen 100.x.y.z:8788`). Do 
 
 Both modes at once are allowed. The relay does not read the direct listener, and the direct listener does not open a Cloudflare socket. Example: dial the relay for Grok Bot, and keep `--listen 127.0.0.1:8788` for a second client on the tailnet, each with its own token.
 
+## Gemini and Antigravity
+
+`/mcp` is unchanged: bearer token, OpenCode tools. Gemini custom apps cannot send that header, so the worker also serves `/gemini/mcp` with OAuth 2.1 (discovery, PKCE, dynamic client registration) limited to the owner email in `OWNER_EMAILS`, or a one-time approval secret. Antigravity can use the same URL with the existing `MCP_TOKEN`, or run `grokcode-shell` over stdio. Commands and file edits are deny-by-default until `~/.config/grokcode/policy.json` exists on that PC. The full deploy and connect steps are in [docs/gemini-shell.md](docs/gemini-shell.md).
+
 ## Develop
 
 ```bash
@@ -284,13 +288,14 @@ npm test
 npm run typecheck
 ```
 
-Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, the default `attach` OpenCode mode, `start_opencode` using the managed service (and refusing a hostname or port that does not match, without writing that config), `opencode_status` reporting `managedService` without a password, `start_opencode` idempotency and the rule that an agent exit does not kill a detached server, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client.
+Tests cover token checks, the directory allowlist (POSIX and Windows paths), config loading (env and JSON files, with real environment variables overriding the file), the default model on `start_session`, `send_prompt`, and `server_info`, the default `attach` OpenCode mode, `start_opencode` using the managed service (and refusing a hostname or port that does not match, without writing that config), `opencode_status` reporting `managedService` without a password, `start_opencode` idempotency and the rule that an agent exit does not kill a detached server, OpenCode config edits that keep unrelated keys, OpenCode process ownership (`auto` / `attach` / `spawn`), the relay frame protocol (including chunked results and oversized frames), hub routing (including replacement connections and timeouts), the v2 and v1 OpenCode clients against a fake HTTP server, message projection for long v2 and v1 assistant turns, MCP `initialize` / `tools/list` / async prompt / sync-wait budget / permission short-circuit, the Worker auth gate, the direct HTTP server, and the agent WebSocket client. Shell-bridge tests cover the policy engine (allowlist bypasses, the hard deny list, path traversal, Windows case), file and symlink confinement, job polling, git branch checks, stdio framing, and the OAuth metadata, dynamic registration, PKCE, token, and non-owner rejection flow.
 
 Layout:
 
 ```text
 packages/shared        MCP tools, OpenCode client, relay hub, frames
-packages/relay-worker  Cloudflare Worker + RelayHubDO
+packages/shell         Policy, shell and file tools, Antigravity stdio server
+packages/relay-worker  Cloudflare Worker + RelayHubDO + OAuth store
 packages/agent         grokcode-agent CLI
 deploy/                systemd, launchd, Windows task and launcher, per-OS installers, example env
 ```
