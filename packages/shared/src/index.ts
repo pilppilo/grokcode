@@ -77,11 +77,13 @@ export {
   MAX_FRAME,
   OPS,
   PROTOCOL_VERSION,
+  SHELL_OPS,
   asRecord,
   assertId,
   encodeMessage,
   encodeResultFrames,
   isOpName,
+  isShellOp,
   optionalString,
   parseChunkedResult,
   parseMessage,
@@ -94,7 +96,8 @@ export type {
   OpName,
   ResultMessage,
   RpcMessage,
+  ShellOpName,
   WelcomeMessage,
 } from "./protocol.js";
 export { TOOLS, toolByName } from "./tools.js";
-export type { ToolDef } from "./tools.js";
+export type { ToolAnnotations, ToolDef } from "./tools.js";

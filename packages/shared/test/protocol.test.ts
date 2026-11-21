@@ -36,6 +36,13 @@ test("oversized results are chunked under the frame limit and reassemble", () =>
   assert.throws(() => parseMessage("x".repeat(MAX_FRAME + 1)), /size limit/);
 });
 
+test("shell bridge ops are forwarded and unknown ops are still rejected", () => {
+  const frame = encodeMessage({ type: "rpc", id: "1", op: "shell_run", params: { argv: ["git", "status"] } });
+  const message = parseMessage(frame);
+  assert.equal(message.type, "rpc");
+  if (message.type === "rpc") assert.equal(message.op, "shell_run");
+});
+
 test("unknown ops and garbage frames are rejected", () => {
   assert.throws(() => parseMessage(JSON.stringify({ type: "rpc", id: "1", op: "raw_http", params: {} })), ToolError);
   assert.throws(() => parseMessage("not-json"), ToolError);

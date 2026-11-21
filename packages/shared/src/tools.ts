@@ -1,11 +1,20 @@
 import type { OpName } from "./protocol.js";
 
+export interface ToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface ToolDef {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   /** When set, the tool is forwarded to a machine as this op. */
   op?: OpName;
+  annotations?: ToolAnnotations;
 }
 
 const machine = {

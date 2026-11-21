@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "grokcode-shell": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/grokcode/packages/shell/dist/cli.js"],
+      "cwd": "/ABSOLUTE/PATH/grokcode",
+      "env": {
+        "GROKCODE_SHELL_POLICY": "/ABSOLUTE/PATH/.config/grokcode/policy.json",
+        "GROKCODE_MACHINE_NAME": "expinsider"
+      },
+      "enabledTools": [
+        "list_machines",
+        "get_machine_info",
+        "run_command",
+        "get_job",
+        "poll_output",
+        "read_file",
+        "list_dir",
+        "write_file",
+        "apply_patch",
+        "git_status",
+        "git_commit_push"
+      ]
+    },
+    "grokcode-shell-remote": {
+      "serverUrl": "https://YOUR_WORKER.workers.dev/gemini/mcp",
+      "headers": {
+        "Authorization": "Bearer PASTE_MCP_TOKEN"
+      },
+      "disabledTools": []
+    }
+  }
+}
