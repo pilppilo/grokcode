@@ -2,6 +2,7 @@ import {
   DEFAULT_SYNC_WAIT_MS,
   MAX_SYNC_WAIT_MS,
   ToolError,
+  errorCode,
   type Clock,
   type MachineBackend,
 } from "grokcode-shared";
@@ -54,22 +55,41 @@ export async function callShellTool(
   const tool = SHELL_TOOLS.find((item) => item.name === name);
   if (!tool) throw new ToolError(`Unknown tool ${name}.`, "unknown_tool");
   const record = isRecord(args) ? { ...args } : {};
-  if (name === "list_machines") return { machines: await backend.listMachines() };
+  if (name === "list_machines") {
+    const machines = await backend.listMachines();
+    return {
+      machines: await Promise.all(machines.map(async (machine) => {
+        try {
+          const info = await backend.call(machine.name, "shell_info", {}, 3_000);
+          return isRecord(info) ? { ...machine, os: info.os, roots: info.roots } : machine;
+        } catch {
+          return machine;
+        }
+      })),
+    };
+  }
   const machine = await resolveMachine(backend, record.machine);
   delete record.machine;
   if (name === "run_command") {
-    const wait = record.wait === true;
+    const wait = record.wait !== false;
     delete record.wait;
-    const started = await backend.call(machine, "shell_run", record, 20_000);
-    if (!wait) return started;
-    const jobId = isRecord(started) && typeof started.jobId === "string" ? started.jobId : undefined;
-    if (!jobId) return started;
     const budget = clampWait(record.timeoutMs, options.maxSyncWaitMs ?? DEFAULT_SYNC_WAIT_MS);
     const clock = options.clock ?? realClock;
     const deadline = clock.now() + budget;
+    const started = await backend.call(machine, "shell_run", record, 20_000);
+    if (!wait) return started;
+    const jobId = isRecord(started) && typeof started.jobId === "string" ? started.jobId : undefined;
+    if (!jobId || (isRecord(started) && started.status !== "running")) return started;
     let last: unknown = started;
-    while (clock.now() <= deadline) {
-      last = await backend.call(machine, "shell_job", { jobId }, 15_000);
+    while (clock.now() < deadline) {
+      const remainingBeforePoll = deadline - clock.now();
+      if (remainingBeforePoll <= 0) break;
+      try {
+        last = await backend.call(machine, "shell_job", { jobId }, Math.min(15_000, remainingBeforePoll));
+      } catch (error) {
+        if (errorCode(error) !== "timeout") throw error;
+        break;
+      }
       const status = isRecord(last) ? last.status : undefined;
       if (status && status !== "running") return last;
       const remaining = deadline - clock.now();

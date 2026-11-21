@@ -17,7 +17,7 @@ function bridge(): HubBridge & { calls: unknown[] } {
     },
     async call(machine, op, params) {
       calls.push({ machine, op, params });
-      return { jobId: "job_test", status: "running" };
+      return { jobId: "job_test", status: op === "shell_job" ? "exited" : "running" };
     },
   };
 }
@@ -77,6 +77,11 @@ test("gemini mcp is a separate tool list and accepts the static bearer", async (
     machine: "my-pc",
     op: "shell_run",
     params: { argv: ["git", "status"], cwd: "C:\\src" },
+  });
+  assert.deepEqual(hub.calls[1], {
+    machine: "my-pc",
+    op: "shell_job",
+    params: { jobId: "job_test" },
   });
 });
 

@@ -18,6 +18,7 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
     throw new ToolError("patch is empty or too large.", "invalid_patch");
   }
   const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
   const files: FilePatch[] = [];
   let current: FilePatch | undefined;
   let hunk: Hunk | undefined;
@@ -63,12 +64,11 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
       hunk.oldLines.push(line.slice(1));
       continue;
     }
-    if (line.startsWith(" ")) {
+    if (line === "" || line.startsWith(" ")) {
       hunk.oldLines.push(line.slice(1));
       hunk.newLines.push(line.slice(1));
       continue;
     }
-    if (line === "") continue;
     throw new ToolError("patch contains a line that is not part of a hunk.", "invalid_patch");
   }
   flushHunk();
