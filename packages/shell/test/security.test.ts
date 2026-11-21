@@ -191,7 +191,7 @@ test("git tools and run_command share the safety wrapper and honor the allowlist
     const text = spec.argv.includes("symbolic-ref")
       ? "main\n"
       : spec.argv.includes("--get-regexp")
-        ? "filter.evil.clean\0"
+        ? "filter.example.driver.clean\0"
         : "";
     return {
       stdout,
@@ -217,7 +217,8 @@ test("git tools and run_command share the safety wrapper and honor the allowlist
   });
   try {
     await runtime.execute("shell_git_status", { cwd: root });
-    const status = calls[0]?.argv.join(" ") ?? "";
+    const status = calls.find(call => call.argv.includes("status"))?.argv.join(" ") ?? "";
+    assert.match(status, /filter\.example\.driver\.process=/);
     assert.match(status, /core\.fsmonitor=/);
     assert.match(status, /core\.hooksPath=\/dev\/null/);
     assert.match(status, /protocol\.ext\.allow=never/);
@@ -250,14 +251,14 @@ test("git tools and run_command share the safety wrapper and honor the allowlist
     );
     calls.length = 0;
     await runtime.execute("shell_run", { cwd: root, argv: ["git", "status"] });
-    assert.match(calls[0]?.argv.join(" ") ?? "", /core\.fsmonitor=/);
+    assert.match(calls.find(call => call.argv.includes("status"))?.argv.join(" ") ?? "", /filter\.example\.driver\.process=/);
     calls.length = 0;
     await runtime.execute("shell_git_commit", { cwd: root, message: "note", paths: ["note.txt"], push: false });
     const add = calls.find((call) => call.argv.includes("add"));
     assert.ok(add);
-    assert.match(add.argv.join(" "), /filter\.evil\.clean=/);
-    assert.match(add.argv.join(" "), /filter\.evil\.smudge=/);
-    assert.match(add.argv.join(" "), /filter\.evil\.process=/);
+    assert.match(add.argv.join(" "), /filter\.example\.driver\.clean=/);
+    assert.match(add.argv.join(" "), /filter\.example\.driver\.smudge=/);
+    assert.match(add.argv.join(" "), /filter\.example\.driver\.process=/);
   } finally {
     runtime.killAll();
     rmSync(root, { recursive: true, force: true });

@@ -40,18 +40,9 @@ function gitBinary(ctx: FileContext, spawnImpl?: SpawnFn): string {
   });
 }
 
-function subcommand(args: readonly string[]): string | undefined {
-  for (const arg of args) {
-    if (arg === "--") return undefined;
-    if (!arg.startsWith("-")) return arg;
-  }
-  return undefined;
-}
-
 async function runGit(
   binary: string,
   userArgs: readonly string[],
-  extraConfig: readonly string[],
   options: {
     cwd: string;
     ctx: FileContext;
@@ -69,6 +60,7 @@ async function runGit(
     });
     if (!decision.allow) throw new ToolError(decision.reason, "policy_denied");
   }
+  const extraConfig = await filterDisableArgs(binary, options.cwd, options.ctx, options.spawnImpl);
   return runAndWait(
     {
       argv: [binary, ...gitSafetyArgs(options.ctx.platform), ...extraConfig, ...userArgs],
@@ -89,32 +81,27 @@ async function filterDisableArgs(
   cwd: string,
   ctx: FileContext,
   spawnImpl: SpawnFn | undefined,
-  modes: Array<"clean" | "smudge" | "process">,
 ): Promise<string[]> {
-  const listed = await runGit(
-    binary,
-    ["config", "--null", "--name-only", "--get-regexp", "^filter\\."],
-    [],
+  const listed = await runAndWait(
     {
-      cwd,
-      ctx,
-      timeoutMs: Math.min(8_000, ctx.policy.limits.timeoutMs),
-      maxOutput: 4096,
-      spawnImpl,
-      allowlist: false,
+      argv: [binary, ...gitSafetyArgs(ctx.platform), "config", "--null", "--name-only", "--get-regexp", "^filter\\."],
+      cwd, platform: ctx.platform, shell: false, env: gitEnv(ctx.platform), roots: ctx.policy.roots,
     },
+    Math.min(8_000, ctx.policy.limits.timeoutMs), 4096, spawnImpl,
   );
   if (listed.timedOut || listed.truncated || (listed.code !== 0 && listed.code !== 1)) {
     throw new ToolError("Could not inspect Git filters.", "git_failed");
   }
   const drivers = new Set<string>();
   for (const key of listed.stdout.split("\0")) {
-    const name = /^filter\.([A-Za-z0-9_-]+)\.(?:clean|smudge|process|required)$/.exec(key)?.[1];
-    if (name) drivers.add(name);
+    if (!key) continue;
+    const match = /^filter\.([A-Za-z0-9_.-]+)\.[A-Za-z0-9-]+$/.exec(key);
+    if (!match) throw new ToolError("Unsupported Git filter configuration.", "git_failed");
+    drivers.add(match[1]!);
   }
   const args: string[] = [];
   for (const name of drivers) {
-    for (const mode of modes) args.push("-c", `filter.${name}.${mode}=`);
+    for (const mode of ["clean", "smudge", "process"]) args.push("-c", `filter.${name}.${mode}=`);
     args.push("-c", `filter.${name}.required=false`);
   }
   return args;
@@ -132,7 +119,7 @@ function assertGitDir(dir: string, ctx: FileContext): void {
   }
 }
 
-/** User `git` argv, rewritten so every spawn carries the safety config. `add` also clears clean/smudge/process filters. */
+/** Apply the same Git safeguards to commands submitted through run_command. */
 export async function wrapGitCommand(
   argv: readonly string[],
   ctx: FileContext,
@@ -141,9 +128,7 @@ export async function wrapGitCommand(
 ): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }> {
   const userArgs = argv.slice(1);
   const binary = gitBinary(ctx, spawnImpl);
-  const extra = subcommand(userArgs) === "add"
-    ? await filterDisableArgs(binary, cwd, ctx, spawnImpl, ["clean", "smudge", "process"])
-    : [];
+  const extra = await filterDisableArgs(binary, cwd, ctx, spawnImpl);
   return {
     argv: [binary, ...gitSafetyArgs(ctx.platform), ...extra, ...userArgs],
     env: gitEnv(ctx.platform),
@@ -152,7 +137,7 @@ export async function wrapGitCommand(
 
 export async function gitStatus(cwd: string, ctx: FileContext, spawnImpl?: SpawnFn): Promise<{ cwd: string; output: string }> {
   const binary = gitBinary(ctx, spawnImpl);
-  const result = await runGit(binary, ["status", "--porcelain=v1", "-b"], [], {
+  const result = await runGit(binary, ["status", "--porcelain=v1", "-b"], {
     cwd,
     ctx,
     timeoutMs: 20_000,
@@ -180,15 +165,12 @@ export async function gitInspect(
   const cap = Math.min(32_768, ctx.policy.limits.maxOutputBytes);
   const timeout = Math.min(8_000, ctx.policy.limits.timeoutMs);
   const common = { cwd, ctx, timeoutMs: timeout, maxOutput: 4096, spawnImpl, allowlist: false as const };
-  const location = await runGit(binary, ["rev-parse", "--absolute-git-dir"], [], common);
+  const location = await runGit(binary, ["rev-parse", "--absolute-git-dir"], common);
   if (location.code !== 0 || location.truncated) {
     throw new ToolError(redact(location.output).trim() || "Cannot locate the Git directory.", "git_failed");
   }
   assertGitDir(location.stdout.trimEnd(), ctx);
-  const extra = command === "diff" && !staged
-    ? await filterDisableArgs(binary, cwd, ctx, spawnImpl, ["clean", "process"])
-    : [];
-  const result = await runGit(binary, args, extra, {
+  const result = await runGit(binary, args, {
     cwd,
     ctx,
     timeoutMs: timeout,
@@ -236,7 +218,7 @@ export async function gitCommit(
     if (isSensitivePath(abs, platform)) throw new ToolError("that path cannot be committed.", "path_denied");
   }
   const binary = gitBinary(ctx, spawnImpl);
-  const branchResult = await runGit(binary, ["symbolic-ref", "--short", "HEAD"], [], {
+  const branchResult = await runGit(binary, ["symbolic-ref", "--short", "HEAD"], {
     cwd,
     ctx,
     timeoutMs: 15_000,
@@ -248,8 +230,7 @@ export async function gitCommit(
   if (branchResult.code !== 0 || !branchAllowed(branch, policy.git.branches)) {
     throw new ToolError(`branch "${branch || "(unknown)"}" is not in the git branch allowlist.`, "branch_denied");
   }
-  const filters = await filterDisableArgs(binary, cwd, ctx, spawnImpl, ["clean", "smudge", "process"]);
-  const add = await runGit(binary, ["--literal-pathspecs", "add", "--", ...options.paths], filters, {
+  const add = await runGit(binary, ["--literal-pathspecs", "add", "--", ...options.paths], {
     cwd,
     ctx,
     timeoutMs: 20_000,
@@ -258,7 +239,7 @@ export async function gitCommit(
     allowlist: false,
   });
   if (add.code !== 0) throw new ToolError(redact(add.output).trim() || "git add failed.", "git_failed");
-  const commit = await runGit(binary, ["--literal-pathspecs", "commit", "-m", options.message, "--", ...options.paths], filters, {
+  const commit = await runGit(binary, ["--literal-pathspecs", "commit", "-m", options.message, "--", ...options.paths], {
     cwd,
     ctx,
     timeoutMs: 30_000,
@@ -271,7 +252,7 @@ export async function gitCommit(
   let pushOutput = "";
   if (options.push) {
     if (!policy.git.push) throw new ToolError("git push is disabled in the machine policy.", "push_denied");
-    const pushedResult = await runGit(binary, ["push", "origin", `HEAD:${branch}`], [], {
+    const pushedResult = await runGit(binary, ["push", "origin", `HEAD:${branch}`], {
       cwd,
       ctx,
       timeoutMs: 60_000,

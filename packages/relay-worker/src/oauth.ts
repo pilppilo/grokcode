@@ -84,7 +84,7 @@ export interface OAuthConfig {
   identity?: IdentityProvider;
   google?: { clientId: string; clientSecret: string };
   publicOrigin?: string;
-  /** Exact redirect URIs. When set, registration and authorize accept only these. */
+  /** Exact redirect URIs required for registration and authorization. */
   pinnedRedirects?: string[];
   /** Cap on dynamic client registrations stored by this worker. Default 50. */
   registrationQuota?: number;
@@ -163,6 +163,10 @@ export function pkceS256(verifier: string): string {
 }
 
 export function redirectUriAllowed(uri: string, pinned?: readonly string[]): boolean {
+  return pinned?.includes(uri) === true && validRedirectUri(uri);
+}
+
+function validRedirectUri(uri: string): boolean {
   if (uri.includes("#") || uri.includes("\\") || /\s/.test(uri)) return false;
   let url: URL;
   try {
@@ -171,10 +175,8 @@ export function redirectUriAllowed(uri: string, pinned?: readonly string[]): boo
     return false;
   }
   if (url.username || url.password || url.hash) return false;
-  if (pinned && pinned.length > 0 && !pinned.includes(uri)) return false;
   if (url.protocol === "https:" && GOOGLE_REDIRECT_HOSTS.has(url.hostname)) {
     // Gemini Custom Apps uses /r/<app> and Antigravity-style clients use /a/<app>.
-    // The exact path is not known until the first dynamic registration.
     return url.pathname.startsWith("/r/") || url.pathname.startsWith("/a/");
   }
   if ((url.protocol === "http:" || url.protocol === "https:") && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) {
@@ -215,7 +217,7 @@ export function parseStaticClients(raw: string | undefined): StaticClient[] {
     if (
       !Array.isArray(redirectUris) ||
       redirectUris.length === 0 ||
-      redirectUris.some((item) => typeof item !== "string" || !redirectUriAllowed(item))
+      redirectUris.some((item) => typeof item !== "string" || !validRedirectUri(item))
     ) {
       throw new Error(`OAUTH_CLIENTS redirect URIs for "${clientId}" are missing or not on the allowlist.`);
     }
@@ -576,6 +578,7 @@ async function googleCallback(url: URL, runtime: OAuthRuntime): Promise<Response
 
 async function finish(runtime: OAuthRuntime, txn: Txn, email: string): Promise<Response> {
   if (!emailAllowed(email, runtime.ownerEmails)) return html("This account cannot use this relay.", 403);
+  if (!redirectUriAllowed(txn.redirectUri, runtime.pinnedRedirects)) return html("Callback is no longer allowed.", 400);
   const code = randomUrlToken(32);
   const row: AuthCode = {
     clientId: txn.clientId,
@@ -642,7 +645,7 @@ async function exchangeCode(runtime: OAuthRuntime, client: StoredClient, form: U
   const redirectUri = form.get("redirect_uri") ?? "";
   const verifier = form.get("code_verifier") ?? "";
   const row = await takeJson<AuthCode>(runtime, `code:${sha256(code)}`);
-  if (!row || row.clientId !== client.clientId || row.redirectUri !== redirectUri) {
+  if (!row || row.clientId !== client.clientId || row.redirectUri !== redirectUri || !redirectUriAllowed(redirectUri, runtime.pinnedRedirects)) {
     return oauthJson({ error: "invalid_grant" }, 400);
   }
   if (!pkceOk(verifier, row.codeChallenge)) return oauthJson({ error: "invalid_grant", error_description: "PKCE verification failed." }, 400);
