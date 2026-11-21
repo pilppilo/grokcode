@@ -94,6 +94,20 @@ test("files stay inside the roots and refuse symlink escapes", async () => {
     assert.equal(written.bytes, 6);
     const read = (await runtime.execute("shell_read_file", { path: file })) as { content: string };
     assert.equal(read.content, "alpha\n");
+    const linesPath = path.join(root, "lines.txt");
+    writeFileSync(linesPath, "one\ntwo\nthree\n");
+    const range = await runtime.execute("shell_read_file", { path: linesPath, startLine: 2, endLine: 2 }) as {
+      content: string; nextOffset: number; truncated: boolean;
+    };
+    assert.equal(range.content, "two\n");
+    assert.equal(range.nextOffset, 8);
+    assert.equal(range.truncated, false);
+    writeFileSync(linesPath, "one\n\nthree\n");
+    await runtime.execute("shell_apply_patch", {
+      cwd: root,
+      patch: ["--- a/lines.txt", "+++ b/lines.txt", "@@ -1,3 +1,3 @@", " one", "", "-three", "+four", ""].join("\n"),
+    });
+    assert.equal(readFileSync(linesPath, "utf8"), "one\n\nfour\n");
     const listed = (await runtime.execute("shell_list_dir", { path: root })) as { entries: Array<{ name: string }> };
     assert.ok(listed.entries.some((entry) => entry.name === "note.txt"));
     await assert.rejects(
@@ -155,7 +169,7 @@ test("git_commit_push respects the branch allowlist", async () => {
     writeFileSync(path.join(root, "note.txt"), "one\n");
     const runtime = runtimeFor(
       root,
-      basePolicy(root, [], { branches: ["cursor/*"], push: false }),
+      basePolicy(root, [{ command: "git", subcommands: ["diff", "log"] }], { branches: ["cursor/*"], push: false }),
     );
     const status = (await runtime.execute("shell_git_status", { cwd: root })) as { output: string };
     assert.match(status.output, /note\.txt/);
@@ -168,6 +182,10 @@ test("git_commit_push respects the branch allowlist", async () => {
       push: false,
     })) as { branch: string };
     assert.equal(committed.branch, "cursor/test");
+    const diff = await runtime.execute("shell_git_diff", { cwd: root }) as { output: string };
+    assert.match(diff.output, /staged\.txt/);
+    const log = await runtime.execute("shell_git_log", { cwd: root, limit: 1 }) as { output: string };
+    assert.match(log.output, /add note/);
     assert.equal(execFileSync("git", ["show", "--format=", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" }).trim(), "note.txt");
     assert.equal(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: root, encoding: "utf8" }).trim(), "staged.txt");
     execFileSync("git", ["checkout", "-b", "dev"], { cwd: root, stdio: "ignore" });
@@ -187,6 +205,52 @@ test("git_commit_push respects the branch allowlist", async () => {
       /push|allowlist/,
     );
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("file search skips hidden and sensitive paths and returns line numbers", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-search-"));
+  try {
+    const runtime = runtimeFor(root, basePolicy(root, [{ command: "rg" }]));
+    writeFileSync(path.join(root, "note.txt"), "first\nmatch here\n");
+    writeFileSync(path.join(root, ".env"), "match here\n");
+    writeFileSync(path.join(root, "hidden.pem"), "match here\n");
+    const found = await runtime.execute("shell_search_files", { cwd: root, query: "match", glob: "*.*" }) as {
+      matches: { path: string; line: number }[];
+    };
+    assert.deepEqual(found.matches.map(({ path: file, line }) => [path.basename(file), line]), [["note.txt", 2]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a running job can be cancelled repeatedly", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-cancel-"));
+  let kills = 0;
+  const runtime = createShellRuntime({
+    platform: "posix",
+    home: root,
+    loadPolicy: () => ({ policy: basePolicy(root, [{ command: "echo" }]), source: "(test)" }),
+    spawnImpl: () => ({
+      stdout: null,
+      stderr: null,
+      kill: () => { kills++; },
+      onExit: () => {},
+    }),
+  });
+  try {
+    const job = await runtime.execute("shell_run", {
+      cwd: root,
+      argv: ["echo", "test"],
+    }) as { jobId: string };
+    const cancelled = await runtime.execute("shell_kill_job", { jobId: job.jobId }) as { status: string };
+    const repeated = await runtime.execute("shell_kill_job", { jobId: job.jobId }) as { status: string };
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(repeated.status, "cancelled");
+    assert.equal(kills, 1);
+  } finally {
+    runtime.killAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

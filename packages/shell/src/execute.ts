@@ -14,7 +14,8 @@ import {
   writeFile,
   type FileContext,
 } from "./files.js";
-import { gitCommit, gitStatus } from "./git.js";
+import { gitCommit, gitInspect, gitStatus } from "./git.js";
+import { searchFiles } from "./search.js";
 import { JobTable } from "./jobs.js";
 import { applyHunks, parseUnifiedDiff } from "./patch.js";
 import { evaluateCommand, evaluateShell, parsePolicy, type LoadedPolicy, type Policy } from "./policy.js";
@@ -81,6 +82,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
 
   async function dispatch(op: string, record: Record<string, unknown>, loaded: LoadedPolicy): Promise<unknown> {
     if (op === "shell_info") return machineInfo(loaded, options);
+    if (op === "shell_kill_job") return jobs.cancel(requiredString(record.jobId, "jobId", 80));
     const policy = requirePolicy(loaded);
     const ctx: FileContext = { policy, platform: options.platform, home: options.home };
     switch (op) {
@@ -88,10 +90,34 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         return startCommand(record, ctx, jobs, spawnImpl);
       case "shell_job":
         return readJob(record, jobs);
+      case "shell_search_files":
+        return searchFiles(
+          confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
+          requiredString(record.query, "query", 1024),
+          record.glob === undefined ? undefined : requiredString(record.glob, "glob", 256),
+          ctx,
+        );
+      case "shell_git_diff":
+      case "shell_git_log":
+        return gitInspect(
+          confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
+          op === "shell_git_diff" ? "diff" : "log",
+          numberArg(record.limit, "limit", 1, 100) ?? 20,
+          ctx,
+          spawnImpl,
+        );
       case "shell_read_file": {
         const offset = numberArg(record.offset, "offset", 0, 50_000_000) ?? 0;
         const maxBytes = numberArg(record.maxBytes, "maxBytes", 1, policy.limits.maxReadBytes);
-        return readFile(requiredString(record.path, "path", 4096), ctx, offset, maxBytes);
+        const start = numberArg(record.startLine, "startLine", 1, 50_000_001);
+        const end = numberArg(record.endLine, "endLine", start ?? 1, 50_000_001);
+        if (record.offset !== undefined && (start !== undefined || end !== undefined)) {
+          throw new ToolError("offset cannot be combined with line ranges.", "invalid_argument");
+        }
+        return readFile(
+          requiredString(record.path, "path", 4096), ctx, offset, maxBytes,
+          start !== undefined || end !== undefined ? { start: start ?? 1, end } : undefined,
+        );
       }
       case "shell_list_dir":
         return listDir(requiredString(record.path, "path", 4096), ctx);
@@ -147,6 +173,7 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
     allowShell: policy?.allowShell ?? false,
     allowInterpreters: policy?.allowInterpreters ?? false,
     commands: policy?.allow.map((rule) => rule.command) ?? [],
+    commandRules: policy?.allow.map(({ command, subcommands }) => ({ command, subcommands })) ?? [],
     git: policy?.git ?? { branches: [], push: false },
     limits: policy?.limits ?? null,
   };
