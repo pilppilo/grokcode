@@ -69,6 +69,9 @@ test("path arguments cannot escape the roots", () => {
   assert.equal(evaluateCommand(parsed, ["git", "status", "../../etc/passwd"], posix).allow, false);
   assert.equal(evaluateCommand(parsed, ["git", "status", "/etc/passwd"], posix).allow, false);
   assert.equal(evaluateCommand(parsed, ["git", "diff", "--", "src/main.ts"], posix).allow, true);
+  for (const sensitive of [".env", ".git/config"]) {
+    assert.match(evaluateCommand(parsed, ["git", "diff", "--", sensitive], posix).reason, /denied path/);
+  }
   const win = policy({}, "win32", "C:\\Users\\ada");
   assert.equal(
     evaluateCommand(win, ["git", "status", "C:\\Work\\..\\Windows\\System32"], {
@@ -102,11 +105,12 @@ test("a filesystem root is not a valid policy root", () => {
   assert.throws(() => parsePolicy(JSON.stringify({ version: 1, roots: [] }), "posix", "/home/ada"), /non-empty/);
 });
 
-test("cmd shim quoting escapes spaces and percent signs", () => {
+test("cmd shim quoting handles spaces and rejects ambiguous input", () => {
   assert.equal(quoteCmdArg("hello"), "hello");
   assert.equal(quoteCmdArg("a b"), '"a b"');
-  assert.equal(quoteCmdArg("100%"), "100%%");
-  assert.equal(quoteCmdArg('say "hi"'), '"say ""hi"""');
+  assert.throws(() => quoteCmdArg("100%"));
+  assert.throws(() => quoteCmdArg('say "hi"'));
+  assert.throws(() => quoteCmdArg("line\nline"));
 });
 
 test("relative paths and the example file live next to the package", () => {

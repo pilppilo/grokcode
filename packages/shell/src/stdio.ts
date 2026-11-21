@@ -3,45 +3,41 @@ import { handleMcpRequest, type MachineBackend } from "grokcode-shared";
 import { callShellTool, SHELL_INSTRUCTIONS, SHELL_SERVER_NAME, SHELL_SERVER_VERSION, SHELL_TOOLS } from "./remote.js";
 import type { ShellRuntime } from "./execute.js";
 
-/** Encode one JSON-RPC message the way MCP stdio (LSP framing) expects. */
+/** Encode one newline-delimited MCP stdio message. */
 export function encodeFrame(payload: unknown): Buffer {
-  const body = Buffer.from(JSON.stringify(payload), "utf8");
-  return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "utf8"), body]);
+  return Buffer.from(JSON.stringify(payload) + "\n", "utf8");
 }
 
 export function createFrameParser(onMessage: (value: unknown) => void, onError: (err: Error) => void): (chunk: Buffer) => void {
-  let buf = Buffer.alloc(0);
-  return (chunk: Buffer) => {
-    buf = Buffer.concat([buf, chunk]);
-    try {
-      while (buf.length > 0) {
-        if (buf[0] === 0x7b) {
-          const nl = buf.indexOf(0x0a);
-          if (nl < 0) return;
-          const line = buf.subarray(0, nl).toString("utf8").replace(/\r$/, "");
-          buf = buf.subarray(nl + 1);
-          if (line.trim() === "") continue;
-          onMessage(JSON.parse(line) as unknown);
-          continue;
-        }
-        const sep = buf.indexOf("\r\n\r\n");
-        if (sep < 0) {
-          if (buf.length > 65_536) throw new Error("MCP header is too large.");
-          return;
-        }
-        const header = buf.subarray(0, sep).toString("utf8");
-        const match = /Content-Length:\s*(\d+)/i.exec(header);
-        if (!match) throw new Error("MCP frame is missing Content-Length.");
-        const len = Number(match[1]);
-        if (!Number.isFinite(len) || len < 0 || len > 1_000_000) throw new Error("MCP frame length is invalid.");
-        const start = sep + 4;
-        if (buf.length < start + len) return;
-        const body = buf.subarray(start, start + len).toString("utf8");
-        buf = buf.subarray(start + len);
-        onMessage(JSON.parse(body) as unknown);
+  const maxLineBytes = 1_000_000;
+  let pending = Buffer.alloc(0);
+  let discarding = false;
+  return (chunk) => {
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(0x0a, start);
+      const end = newline === -1 ? chunk.length : newline;
+      const part = chunk.subarray(start, end);
+      if (!discarding && pending.length + part.length > maxLineBytes) {
+        pending = Buffer.alloc(0);
+        discarding = true;
+        onError(new Error("MCP stdio message is too large."));
       }
-    } catch (err) {
-      onError(err instanceof Error ? err : new Error(String(err)));
+      if (!discarding) pending = Buffer.concat([pending, part]);
+      if (newline === -1) return;
+      const line = pending.toString("utf8").trim();
+      pending = Buffer.alloc(0);
+      discarding = false;
+      start = end + 1;
+      if (!line) continue;
+      let message: unknown;
+      try {
+        message = JSON.parse(line);
+      } catch (err) {
+        onError(err instanceof Error ? err : new Error(String(err)));
+        continue;
+      }
+      onMessage(message);
     }
   };
 }
@@ -74,6 +70,7 @@ export async function handleStdioMessage(message: unknown, backend: MachineBacke
   const response = await handleMcpRequest(request, {
     backend,
     tools: SHELL_TOOLS,
+    preserveToolResults: true,
     callTool: (toolName, args) => callShellTool(backend, toolName, args),
     serverName: SHELL_SERVER_NAME,
     serverVersion: SHELL_SERVER_VERSION,

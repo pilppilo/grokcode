@@ -63,14 +63,14 @@ export async function gitCommit(
     );
   }
   const add = await runAndWait(
-    { argv: ["git", "add", "--", ...options.paths], cwd, platform, shell: false },
+    { argv: ["git", "--literal-pathspecs", "add", "--", ...options.paths], cwd, platform, shell: false },
     20_000,
     policy.limits.maxOutputBytes,
     spawnImpl,
   );
   if (add.code !== 0) throw new ToolError(redact(add.output).trim() || "git add failed.", "git_failed");
   const commit = await runAndWait(
-    { argv: ["git", "commit", "-m", options.message], cwd, platform, shell: false },
+    { argv: ["git", "--literal-pathspecs", "commit", "-m", options.message, "--", ...options.paths], cwd, platform, shell: false },
     30_000,
     policy.limits.maxOutputBytes,
     spawnImpl,
