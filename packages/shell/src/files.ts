@@ -46,7 +46,8 @@ export function readFile(input: string, ctx: FileContext, offset = 0, maxBytes?:
     const length = Math.min(cap, Math.max(0, size - start));
     const buffer = Buffer.alloc(length);
     const read = length === 0 ? 0 : fs.readSync(fd, buffer, 0, length, start);
-    const content = redact(buffer.subarray(0, read).toString("utf8"));
+    const sourceCode = /\.[cm]?[jt]sx?$/i.test(file);
+    const content = redact(buffer.subarray(0, read).toString("utf8"), sourceCode);
     return { path: file, content, bytes: read, truncated: start + read < size };
   } finally {
     fs.closeSync(fd);
@@ -88,6 +89,13 @@ export function writeFile(input: string, contents: string, ctx: FileContext): { 
 export function removeFile(input: string, ctx: FileContext): void {
   const file = confineFile(input, ctx, undefined, false, false);
   fs.unlinkSync(file);
+}
+
+export function validatePatchFile(abs: string, allowMissing: boolean): void {
+  const stat = fs.lstatSync(abs, { throwIfNoEntry: false });
+  if ((!stat && !allowMissing) || (stat && !stat.isFile())) {
+    throw new ToolError("patch path is not a regular file.", "invalid_path");
+  }
 }
 
 export function readTextIfExists(abs: string, maxBytes: number): string {

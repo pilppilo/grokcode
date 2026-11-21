@@ -113,6 +113,18 @@ test("files stay inside the roots and refuse symlink escapes", async () => {
     })) as { files: Array<{ action: string }> };
     assert.equal(patched.files[0]?.action, "updated");
     assert.equal(readFileSync(file, "utf8"), "beta\n");
+    await assert.rejects(() => runtime.execute("shell_apply_patch", {
+      cwd: root,
+      patch: [
+        "--- a/note.txt", "+++ b/note.txt", "@@ -1 +1 @@", "-beta", "+gamma",
+        "--- a/inside.txt", "+++ b/inside.txt", "@@ -1 +1 @@", "-wrong", "+next", "",
+      ].join("\n"),
+    }), ToolError);
+    assert.equal(readFileSync(file, "utf8"), "beta\n");
+    const code = path.join(root, "source.ts");
+    writeFileSync(code, 'const secret = requestedMethod;\nconst config = { password: options.password };\n');
+    const source = await runtime.execute("shell_read_file", { path: code }) as { content: string };
+    assert.equal(source.content, readFileSync(code, "utf8"));
     await assert.rejects(
       () =>
         runtime.execute("shell_apply_patch", {
@@ -147,6 +159,8 @@ test("git_commit_push respects the branch allowlist", async () => {
     );
     const status = (await runtime.execute("shell_git_status", { cwd: root })) as { output: string };
     assert.match(status.output, /note\.txt/);
+    writeFileSync(path.join(root, "staged.txt"), "already staged\n");
+    execFileSync("git", ["add", "--", "staged.txt"], { cwd: root });
     const committed = (await runtime.execute("shell_git_commit", {
       cwd: root,
       message: "add note",
@@ -154,6 +168,8 @@ test("git_commit_push respects the branch allowlist", async () => {
       push: false,
     })) as { branch: string };
     assert.equal(committed.branch, "cursor/test");
+    assert.equal(execFileSync("git", ["show", "--format=", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" }).trim(), "note.txt");
+    assert.equal(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: root, encoding: "utf8" }).trim(), "staged.txt");
     execFileSync("git", ["checkout", "-b", "dev"], { cwd: root, stdio: "ignore" });
     writeFileSync(path.join(root, "other.txt"), "two\n");
     await assert.rejects(

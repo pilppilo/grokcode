@@ -552,15 +552,22 @@ async function revoke(request: Request, runtime: OAuthRuntime): Promise<Response
   const hash = sha256(token);
   const refresh = await runtime.store.get(`refresh:${hash}`);
   if (refresh && (JSON.parse(refresh) as RefreshRow).clientId === client.clientId) {
-    // Keep a marker so an in-flight refresh cannot restore a revoked grant.
-    await runtime.store.put(`revoked:${hash}`, "1", runtime.now() + REFRESH_TTL_MS + ACCESS_TTL_MS);
+    await revokeGrant(runtime, hash);
   } else {
-    const access = await runtime.store.get(`access:${hash}`);
-    if (access && (JSON.parse(access) as AccessRow).clientId === client.clientId) {
+    const raw = await runtime.store.get(`access:${hash}`);
+    const access = raw ? (JSON.parse(raw) as AccessRow) : null;
+    if (access?.clientId === client.clientId) {
+      if (access.refreshHash) await revokeGrant(runtime, access.refreshHash);
       await runtime.store.delete(`access:${hash}`);
     }
   }
   return new Response(null, { headers: { "access-control-allow-origin": "*", "cache-control": "no-store" } });
+}
+
+async function revokeGrant(runtime: OAuthRuntime, hash: string): Promise<void> {
+  // Keep a marker so an in-flight refresh cannot restore a usable grant.
+  await runtime.store.put(`revoked:${hash}`, "1", runtime.now() + REFRESH_TTL_MS + ACCESS_TTL_MS);
+  await runtime.store.delete(`refresh:${hash}`);
 }
 
 async function exchangeCode(runtime: OAuthRuntime, client: StoredClient, form: URLSearchParams): Promise<Response> {
@@ -584,6 +591,10 @@ async function exchangeRefresh(runtime: OAuthRuntime, client: StoredClient, form
   const row = raw ? (JSON.parse(raw) as RefreshRow) : null;
   if (!row || row.expiresAt <= runtime.now() || row.clientId !== client.clientId) return oauthJson({ error: "invalid_grant" }, 400);
   if (!emailAllowed(row.email, runtime.ownerEmails)) return oauthJson({ error: "access_denied" }, 403);
+  if (!runtime.staticClients.some((entry) => entry.clientId === client.clientId)) {
+    const expiresAt = runtime.now() + CLIENT_TTL_MS;
+    await runtime.store.put(`client:${client.clientId}`, JSON.stringify({ ...client, expiresAt }), expiresAt);
+  }
   return issueTokens(runtime, client.clientId, row.email, row.scope, refresh);
 }
 
@@ -600,6 +611,11 @@ async function issueTokens(
   const refreshRow: RefreshRow = { clientId, email, scope, expiresAt: runtime.now() + REFRESH_TTL_MS };
   await runtime.store.put(`access:${sha256(access)}`, JSON.stringify(accessRow), accessRow.expiresAt);
   await runtime.store.put(`refresh:${refreshHash}`, JSON.stringify(refreshRow), refreshRow.expiresAt);
+  if (await runtime.store.get(`revoked:${refreshHash}`)) {
+    await runtime.store.delete(`refresh:${refreshHash}`);
+    await runtime.store.delete(`access:${sha256(access)}`);
+    return oauthJson({ error: "invalid_grant" }, 400);
+  }
   return oauthJson({
     access_token: access,
     token_type: "Bearer",
