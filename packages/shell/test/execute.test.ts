@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -125,6 +125,16 @@ test("files stay inside the roots and refuse symlink escapes", async () => {
       (err: unknown) => err instanceof ToolError && err.code === "path_denied",
     );
     await assert.rejects(() => runtime.execute("shell_write_file", { path: path.join(root, ".env"), contents: "TOKEN=abcdefghi" }), ToolError);
+    await assert.rejects(
+      () => runtime.execute("shell_write_file", { path: path.join(root, "nested", ".git"), contents: "gitdir: /tmp/evil\n" }),
+      (err: unknown) => err instanceof ToolError && err.code === "path_denied",
+    );
+    const ignore = path.join(root, ".gitignore");
+    await runtime.execute("shell_write_file", { path: ignore, contents: "node_modules\n" });
+    const ignoreRead = (await runtime.execute("shell_read_file", { path: ignore })) as { content: string };
+    assert.equal(ignoreRead.content, "node_modules\n");
+    const workflow = path.join(root, ".github", "workflows", "ci.yml");
+    await runtime.execute("shell_write_file", { path: workflow, contents: "name: ci\n" });
     symlinkSync(outside, path.join(root, "escape"));
     await assert.rejects(() => runtime.execute("shell_read_file", { path: path.join(root, "escape") }), ToolError);
     writeFileSync(path.join(root, "inside.txt"), "inside\n");
@@ -183,9 +193,17 @@ test("git_commit_push respects the branch allowlist", async () => {
     writeFileSync(path.join(root, "note.txt"), "one\n");
     const runtime = runtimeFor(
       root,
-      basePolicy(root, [{ command: "git", subcommands: ["diff", "log"] }], { branches: ["cursor/*"], push: false }),
+      basePolicy(root, [{ command: "git", subcommands: ["status", "diff", "log"] }], { branches: ["cursor/*"], push: false }),
     );
+    const marker = path.join(root, "fsmonitor-ran");
+    const hookMarker = path.join(root, "hook-ran");
+    execFileSync("git", ["config", "core.fsmonitor", `touch ${marker}`], { cwd: root });
+    const hooks = path.join(root, "evil-hooks");
+    mkdirSync(hooks);
+    writeFileSync(path.join(hooks, "pre-commit"), `#!/bin/sh\ntouch ${hookMarker}\n`, { mode: 0o755 });
+    execFileSync("git", ["config", "core.hooksPath", hooks], { cwd: root });
     const status = (await runtime.execute("shell_git_status", { cwd: root })) as { output: string };
+    assert.equal(existsSync(marker), false);
     assert.match(status.output, /note\.txt/);
     writeFileSync(path.join(root, "staged.txt"), "already staged\n");
     execFileSync("git", ["add", "--", "staged.txt"], { cwd: root });
@@ -196,6 +214,7 @@ test("git_commit_push respects the branch allowlist", async () => {
       push: false,
     })) as { branch: string };
     assert.equal(committed.branch, "cursor/test");
+    assert.equal(existsSync(hookMarker), false);
     const diff = await runtime.execute("shell_git_diff", { cwd: root, staged: true }) as { output: string };
     assert.match(diff.output, /staged\.txt/);
     writeFileSync(path.join(root, ".gitattributes"), "note.txt filter=untrusted\n");
@@ -204,8 +223,17 @@ test("git_commit_push respects the branch allowlist", async () => {
     writeFileSync(path.join(root, "note.txt"), "unstaged edit\n");
     const unstaged = await runtime.execute("shell_git_diff", { cwd: root }) as { output: string };
     assert.match(unstaged.output, /unstaged edit/);
+    const filtered = await runtime.execute("shell_git_commit", {
+      cwd: root,
+      message: "with filter",
+      paths: ["note.txt"],
+      push: false,
+    }) as { branch: string };
+    assert.equal(filtered.branch, "cursor/test");
+    assert.equal(existsSync(hookMarker), false);
+    assert.equal(execFileSync("git", ["show", "HEAD:note.txt"], { cwd: root, encoding: "utf8" }), "unstaged edit\n");
     const log = await runtime.execute("shell_git_log", { cwd: root, limit: 1 }) as { output: string };
-    assert.match(log.output, /add note/);
+    assert.match(log.output, /with filter/);
     assert.equal(execFileSync("git", ["show", "--format=", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" }).trim(), "note.txt");
     assert.equal(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: root, encoding: "utf8" }).trim(), "staged.txt");
     execFileSync("git", ["checkout", "-b", "dev"], { cwd: root, stdio: "ignore" });
@@ -282,11 +310,10 @@ test("missing programs report spawn errors immediately", async () => {
   try {
     const program = "grokcode-test-missing-program";
     const runtime = runtimeFor(root, basePolicy(root, [{ command: program }]));
-    const started = await runtime.execute("shell_run", { cwd: root, argv: [program], timeoutMs: 10_000 }) as { jobId: string };
-    await new Promise((resolve) => setImmediate(resolve));
-    const job = await runtime.execute("shell_job", { jobId: started.jobId }) as { status: string; output: string };
-    assert.equal(job.status, "exited");
-    assert.match(job.output, /ENOENT/);
+    await assert.rejects(
+      () => runtime.execute("shell_run", { cwd: root, argv: [program], timeoutMs: 10_000 }),
+      (err: unknown) => err instanceof ToolError && err.code === "not_found",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

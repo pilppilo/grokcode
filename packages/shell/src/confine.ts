@@ -59,10 +59,36 @@ export function withinRoots(target: string, roots: readonly string[], platform: 
   });
 }
 
-export function commandBase(argv0: string, platform: PathPlatform): string {
+/**
+ * True when `target` is inside a root, or is a parent of one.
+ * Walking `/tmp` on the way to `/tmp/project` is not an escape.
+ * A symlink that lands in `/etc` is.
+ */
+function withinOrAncestor(target: string, roots: readonly string[], platform: PathPlatform): boolean {
+  if (withinRoots(target, roots, platform)) return true;
   const path = pathApi(platform);
-  let base = path.basename(argv0.replaceAll('"', ""));
-  if (platform === "win32") base = base.toLowerCase().replace(/\.(exe|cmd|bat|com)$/i, "");
+  const goal = compareKey(path.normalize(target), platform);
+  const prefix = goal.endsWith(path.sep) ? goal : goal + path.sep;
+  return roots.some((root) => compareKey(path.normalize(root), platform).startsWith(prefix));
+}
+
+/** A single path segment. Slashes, backslashes, and `C:` prefixes are rejected. */
+export function isBareCommandName(name: string): boolean {
+  if (typeof name !== "string" || name.length === 0 || name.length > 128) return false;
+  if (name === "." || name === "..") return false;
+  if (/[\\/]/.test(name) || /^[a-zA-Z]:/.test(name)) return false;
+  return /^[A-Za-z0-9._+-]+$/.test(name);
+}
+
+/**
+ * Allowlist key for a command the user typed.
+ * Paths do not match. `.exe` is stripped on Windows so `git.exe` is `git`.
+ * `.cmd`, `.bat`, and `.com` are left intact so a script shim cannot impersonate `git`.
+ */
+export function commandBase(argv0: string, platform: PathPlatform): string {
+  if (!isBareCommandName(argv0)) return "";
+  let base = argv0;
+  if (platform === "win32") base = base.toLowerCase().replace(/\.exe$/i, "");
   return base;
 }
 
@@ -85,7 +111,23 @@ export function expandLexical(input: string, platform: PathPlatform, home: strin
   if (hasAlternateDataStream(normalized, platform)) {
     throw new ToolError("Windows alternate data streams are denied.", "invalid_path");
   }
+  assertNoWindowsAliases(normalized, platform);
   return normalized;
+}
+
+/** 8.3 short names (`GIT~1`) and trailing dots or spaces (`id_rsa.`, `.git.`) are denied on Windows. */
+export function windowsAliasSegment(part: string): boolean {
+  return /[ .]$/.test(part) || /~\d/.test(part);
+}
+
+function assertNoWindowsAliases(abs: string, platform: PathPlatform): void {
+  if (platform !== "win32") return;
+  for (const part of abs.split(/[\\/]/).filter(Boolean)) {
+    if (/^[a-zA-Z]:$/.test(part)) continue;
+    if (windowsAliasSegment(part)) {
+      throw new ToolError("Windows short names and trailing dots or spaces are denied.", "invalid_path");
+    }
+  }
 }
 
 function hasAlternateDataStream(abs: string, platform: PathPlatform): boolean {
@@ -99,9 +141,11 @@ export function isSensitivePath(abs: string, platform: PathPlatform): boolean {
   const lower = parts.map((part) => (platform === "win32" ? part.toLowerCase() : part));
   for (let i = 0; i < lower.length; i++) {
     const part = lower[i] ?? "";
+    if (platform === "win32" && windowsAliasSegment(part)) return true;
     if (SECRET_DIRS.has(part)) return true;
     if (part === ".config" && lower[i + 1] === "grokcode") return true;
-    if (part === ".git" && (lower[i + 1] === "hooks" || lower[i + 1] === "config" || lower[i + 1] === "info")) return true;
+    // Exact segment only, so .gitignore, .gitattributes, and .github stay readable.
+    if (part === ".git") return true;
   }
   const base = lower[lower.length - 1] ?? "";
   if (base === ".env" || (base.startsWith(".env.") && base !== ".env.example" && base !== ".env.sample")) return true;
@@ -157,33 +201,40 @@ export function confine(input: string, options: ConfineOptions): string {
       }
       throw new ToolError(`path could not be read: ${input}`, "path_denied");
     }
-    if (st.isSymbolicLink()) {
-      if (!options.followFinal && i === rest.length - 1) {
-        throw new ToolError("refusing to follow a symlink at the final path.", "path_denied");
-      }
-      let target: string;
-      try {
-        target = io.realpathSync(next);
-      } catch {
-        throw new ToolError("symlink could not be resolved.", "path_denied");
-      }
-      const real = expandLexical(target, options.platform, options.home);
-      if (!withinRoots(real, options.roots, options.platform) || isSensitivePath(real, options.platform)) {
-        throw new ToolError("symlink escapes the allowed roots.", "path_denied");
-      }
-      acc = real;
-      continue;
+    if (st.isSymbolicLink() && !options.followFinal && i === rest.length - 1) {
+      throw new ToolError("refusing to follow a symlink at the final path.", "path_denied");
     }
-    if (i < rest.length - 1 && !st.isDirectory()) {
+    let canonical: string;
+    try {
+      canonical = canonicalizePath(io, next);
+    } catch {
+      throw new ToolError("path could not be resolved.", "path_denied");
+    }
+    const real = expandLexical(canonical, options.platform, options.home);
+    if (isSensitivePath(real, options.platform)) throw new ToolError(`path is denied: ${input}`, "path_denied");
+    if (!withinOrAncestor(real, options.roots, options.platform)) {
+      throw new ToolError(st.isSymbolicLink() ? "symlink escapes the allowed roots." : "path escapes the allowed roots.", "path_denied");
+    }
+    if (i < rest.length - 1 && !st.isSymbolicLink() && !st.isDirectory()) {
       throw new ToolError(`not a directory: ${input}`, "invalid_path");
     }
-    acc = next;
+    acc = real;
   }
   const resolved = expandLexical(acc, options.platform, options.home);
   if (!withinRoots(resolved, options.roots, options.platform) || isSensitivePath(resolved, options.platform)) {
     throw new ToolError("path escapes the allowed roots.", "path_denied");
   }
   return resolved;
+}
+
+/** `realpathSync.native` canonicalizes 8.3 names and trailing-dot aliases. Fall back when a test double has no native helper. */
+function canonicalizePath(io: Pick<FsLike, "realpathSync">, target: string): string {
+  const realpath = io.realpathSync as {
+    (file: string): string;
+    native?: (file: string) => string;
+  };
+  if (typeof realpath.native === "function") return realpath.native(target);
+  return realpath(target);
 }
 
 /** Expand policy roots the same way the agent expands OpenCode directories. */

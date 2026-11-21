@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 import { ToolError, asRecord, errorMessage, requiredString, type PathPlatform } from "grokcode-shared";
 
@@ -14,12 +15,13 @@ import {
   writeFile,
   type FileContext,
 } from "./files.js";
-import { gitCommit, gitInspect, gitStatus } from "./git.js";
+import { commandBase, withinRoots } from "./confine.js";
+import { gitCommit, gitInspect, gitStatus, wrapGitCommand } from "./git.js";
 import { searchFiles } from "./search.js";
 import { JobTable } from "./jobs.js";
 import { applyHunks, parseUnifiedDiff } from "./patch.js";
 import { evaluateCommand, evaluateShell, parsePolicy, type LoadedPolicy, type Policy } from "./policy.js";
-import { defaultSpawn, type SpawnFn } from "./spawn.js";
+import { defaultSpawn, reapDetachedChildren, type SpawnFn } from "./spawn.js";
 
 export interface ShellRuntimeOptions {
   platform: PathPlatform;
@@ -27,6 +29,8 @@ export interface ShellRuntimeOptions {
   /** Read on every call so a policy edit applies without a restart. */
   loadPolicy: () => LoadedPolicy;
   auditPath?: string;
+  /** Policy file and audit log. A root that contains either is refused. */
+  protectedPaths?: string[];
   jobs?: JobTable;
   spawnImpl?: SpawnFn;
   now?: () => number;
@@ -46,6 +50,13 @@ export function policyFromFile(file: string | undefined, platform: PathPlatform,
   }
   try {
     const policy = parsePolicy(readFileSync(file, "utf8"), platform, home);
+    if (withinRoots(path.resolve(file), policy.roots, platform)) {
+      return {
+        policy: null,
+        source: file,
+        error: "A policy root contains the policy file. Move the root so it does not cover it.",
+      };
+    }
     return { policy, source: file };
   } catch (err) {
     return { policy: null, source: file, error: errorMessage(err) };
@@ -62,7 +73,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
 
   async function execute(op: string, params: unknown): Promise<unknown> {
     const record = asRecord(params);
-    const loaded = options.loadPolicy();
+    const loaded = isolateRoots(options.loadPolicy(), options.platform, options.protectedPaths);
     const base: AuditEvent = {
       ts: new Date(options.now?.() ?? Date.now()).toISOString(),
       tool: op,
@@ -127,18 +138,14 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
       case "shell_apply_patch":
         return applyPatch(record, ctx);
       case "shell_git_status":
-        return gitStatus(
-          confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
-          options.platform,
-          policy.limits.maxOutputBytes,
-          spawnImpl,
-        );
+        return gitStatus(confineCwd(requiredString(record.cwd, "cwd", 4096), ctx), ctx, spawnImpl);
       case "shell_git_commit":
         return gitCommit(
           {
             cwd: confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
             platform: options.platform,
             policy,
+            home: options.home,
             message: requiredString(record.message, "message", 5_000),
             paths: stringArray(record.paths, "paths"),
             push: record.push === true,
@@ -152,8 +159,25 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
 
   return {
     execute,
-    killAll: () => jobs.killAll(),
+    killAll: () => {
+      jobs.killAll();
+      reapDetachedChildren();
+    },
   };
+}
+
+function isolateRoots(loaded: LoadedPolicy, platform: PathPlatform, protectedPaths: readonly string[] | undefined): LoadedPolicy {
+  if (!loaded.policy || !protectedPaths || protectedPaths.length === 0) return loaded;
+  for (const file of protectedPaths) {
+    if (withinRoots(path.resolve(file), loaded.policy.roots, platform)) {
+      return {
+        policy: null,
+        source: loaded.source,
+        error: "A policy root contains the policy file or the audit log. Move the root so it does not cover them.",
+      };
+    }
+  }
+  return loaded;
 }
 
 function requirePolicy(loaded: LoadedPolicy): Policy {
@@ -180,7 +204,7 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
   };
 }
 
-function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn) {
+async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn) {
   const shell = record.shell === true;
   const cwd = confineCwd(requiredString(record.cwd, "cwd", 4096), ctx);
   const timeoutMs = Math.min(
@@ -202,7 +226,21 @@ function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: J
   if (argv.length === 0) throw new ToolError("argv must contain the program and its arguments.", "invalid_argument");
   const decision = evaluateCommand(ctx.policy, argv, { platform: ctx.platform, cwd, home: ctx.home });
   if (!decision.allow) throw new ToolError(decision.reason, "policy_denied");
-  return jobs.start({ argv, cwd, platform: ctx.platform, shell: false }, timeoutMs, ctx.policy.limits.maxOutputBytes, spawnImpl);
+  if (commandBase(argv[0] ?? "", ctx.platform) === "git") {
+    const wrapped = await wrapGitCommand(argv, ctx, cwd, spawnImpl);
+    return jobs.start(
+      { argv: wrapped.argv, cwd, platform: ctx.platform, shell: false, env: wrapped.env, roots: ctx.policy.roots },
+      timeoutMs,
+      ctx.policy.limits.maxOutputBytes,
+      spawnImpl,
+    );
+  }
+  return jobs.start(
+    { argv, cwd, platform: ctx.platform, shell: false, roots: ctx.policy.roots },
+    timeoutMs,
+    ctx.policy.limits.maxOutputBytes,
+    spawnImpl,
+  );
 }
 
 function readJob(record: Record<string, unknown>, jobs: JobTable) {
@@ -290,5 +328,14 @@ function auditFields(record: Record<string, unknown>): Partial<AuditEvent> {
   if (typeof record.path === "string") fields.path = record.path;
   if (typeof record.cwd === "string") fields.cwd = record.cwd;
   if (typeof record.jobId === "string") fields.jobId = record.jobId;
+  if (Array.isArray(record.paths)) {
+    const paths = record.paths.filter((item): item is string => typeof item === "string");
+    if (paths.length > 0) fields.paths = paths;
+  } else if (typeof record.patch === "string") {
+    const paths = [...record.patch.matchAll(/^(?:\+\+\+|---) (?:[ab]\/)?(\S+)/gm)]
+      .map((match) => match[1] ?? "")
+      .filter((item) => item !== "" && item !== "/dev/null");
+    if (paths.length > 0) fields.paths = [...new Set(paths)];
+  }
   return fields;
 }

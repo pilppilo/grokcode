@@ -10,6 +10,7 @@ export interface AuditEvent {
   reason?: string;
   argv?: string[];
   path?: string;
+  paths?: string[];
   cwd?: string;
   jobId?: string;
 }
@@ -18,6 +19,7 @@ export function auditLine(event: AuditEvent): string {
   const safe: AuditEvent = {
     ...event,
     ...(event.argv ? { argv: event.argv.map((arg) => redact(arg)) } : {}),
+    ...(event.paths ? { paths: event.paths.map((item) => redact(item)) } : {}),
     ...(event.reason ? { reason: redact(event.reason) } : {}),
   };
   return JSON.stringify(safe);

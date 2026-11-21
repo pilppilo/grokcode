@@ -6,10 +6,12 @@ import { MIN_TOKEN_LENGTH, tokensEqual } from "grokcode-shared";
 export const GEMINI_MCP_PATH = "/gemini/mcp";
 
 const ACCESS_TTL_MS = 60 * 60 * 1000;
-const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Absolute lifetime from creation. Refresh returns the same token and does not extend this. */
+const REFRESH_MAX_MS = 90 * 24 * 60 * 60 * 1000;
 const CODE_TTL_MS = 60 * 1000;
 const TXN_TTL_MS = 10 * 60 * 1000;
 const CLIENT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const DEFAULT_REGISTRATION_QUOTA = 50;
 
 const GOOGLE_REDIRECT_HOSTS = new Set([
   "oauth-redirect.googleusercontent.com",
@@ -21,6 +23,8 @@ export interface OAuthStore {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, expiresAt?: number): Promise<void>;
   delete(key: string): Promise<void>;
+  /** Delete the key and return its previous value. One atomic step, so two redemptions cannot both succeed. */
+  take(key: string): Promise<string | null>;
 }
 
 export class MemoryOAuthStore implements OAuthStore {
@@ -44,6 +48,14 @@ export class MemoryOAuthStore implements OAuthStore {
 
   async delete(key: string): Promise<void> {
     this.rows.delete(key);
+  }
+
+  async take(key: string): Promise<string | null> {
+    const row = this.rows.get(key);
+    if (!row) return null;
+    this.rows.delete(key);
+    if (row.expiresAt != null && row.expiresAt <= this.now()) return null;
+    return row.value;
   }
 }
 
@@ -72,6 +84,10 @@ export interface OAuthConfig {
   identity?: IdentityProvider;
   google?: { clientId: string; clientSecret: string };
   publicOrigin?: string;
+  /** Exact redirect URIs. When set, registration and authorize accept only these. */
+  pinnedRedirects?: string[];
+  /** Cap on dynamic client registrations stored by this worker. Default 50. */
+  registrationQuota?: number;
   now?: () => number;
   fetchImpl?: typeof fetch;
 }
@@ -84,6 +100,8 @@ interface OAuthRuntime {
   approvalSecret?: string;
   staticClients: StaticClient[];
   identity?: IdentityProvider;
+  pinnedRedirects: string[];
+  registrationQuota: number;
   now: () => number;
 }
 
@@ -118,6 +136,7 @@ interface RefreshRow {
   clientId: string;
   email: string;
   scope: string;
+  createdAt: number;
   expiresAt: number;
 }
 
@@ -126,7 +145,13 @@ interface AccessRow {
   clientId: string;
   email: string;
   scope: string;
+  resource: string;
   expiresAt: number;
+}
+
+interface Consent extends Txn {
+  email: string;
+  csrf: string;
 }
 
 export function sha256(value: string): string {
@@ -137,7 +162,7 @@ export function pkceS256(verifier: string): string {
   return sha256(verifier);
 }
 
-export function redirectUriAllowed(uri: string): boolean {
+export function redirectUriAllowed(uri: string, pinned?: readonly string[]): boolean {
   if (uri.includes("#") || uri.includes("\\") || /\s/.test(uri)) return false;
   let url: URL;
   try {
@@ -146,7 +171,12 @@ export function redirectUriAllowed(uri: string): boolean {
     return false;
   }
   if (url.username || url.password || url.hash) return false;
-  if (url.protocol === "https:" && GOOGLE_REDIRECT_HOSTS.has(url.hostname)) return true;
+  if (pinned && pinned.length > 0 && !pinned.includes(uri)) return false;
+  if (url.protocol === "https:" && GOOGLE_REDIRECT_HOSTS.has(url.hostname)) {
+    // Gemini Custom Apps uses /r/<app> and Antigravity-style clients use /a/<app>.
+    // The exact path is not known until the first dynamic registration.
+    return url.pathname.startsWith("/r/") || url.pathname.startsWith("/a/");
+  }
   if ((url.protocol === "http:" || url.protocol === "https:") && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) {
     return true;
   }
@@ -194,7 +224,6 @@ export function parseStaticClients(raw: string | undefined): StaticClient[] {
 }
 
 export function emailAllowed(email: string, ownerEmails: readonly string[]): boolean {
-  if (email === "owner") return true;
   const needle = email.trim().toLowerCase();
   if (!needle.includes("@")) return false;
   return ownerEmails.some((item) => item.toLowerCase() === needle);
@@ -271,7 +300,10 @@ export function runtimeFromRequest(request: Request, config: OAuthConfig): OAuth
   const identity =
     config.identity ??
     (config.google ? googleIdentity(config.google.clientId, config.google.clientSecret, config.fetchImpl) : undefined);
-  const approval = config.approvalSecret && config.approvalSecret.length >= MIN_TOKEN_LENGTH ? config.approvalSecret : undefined;
+  // Google sign-in is the owner gate. The approval secret must not bypass it.
+  const approval =
+    !identity && config.approvalSecret && config.approvalSecret.length >= MIN_TOKEN_LENGTH ? config.approvalSecret : undefined;
+  const pinned = (config.pinnedRedirects ?? []).map((item) => item.trim()).filter(Boolean);
   return {
     issuer: origin,
     resource: `${origin}${GEMINI_MCP_PATH}`,
@@ -280,6 +312,8 @@ export function runtimeFromRequest(request: Request, config: OAuthConfig): OAuth
     ...(approval ? { approvalSecret: approval } : {}),
     staticClients: config.staticClients ?? [],
     ...(identity ? { identity } : {}),
+    pinnedRedirects: pinned,
+    registrationQuota: config.registrationQuota ?? DEFAULT_REGISTRATION_QUOTA,
     now: config.now ?? Date.now,
   };
 }
@@ -334,6 +368,7 @@ export async function accessTokenSubject(
     return null;
   }
   if (row.expiresAt <= runtime.now()) return null;
+  if (row.resource !== runtime.resource) return null;
   if (row.refreshHash && await runtime.store.get(`revoked:${row.refreshHash}`)) return null;
   if (!emailAllowed(row.email, runtime.ownerEmails)) return null;
   return { email: row.email, clientId: row.clientId };
@@ -368,8 +403,13 @@ function resourceMetadata(runtime: OAuthRuntime): Response {
 async function register(request: Request, runtime: OAuthRuntime): Promise<Response> {
   if (request.method !== "POST") return oauthJson({ error: "invalid_request" }, 405);
   const body = await readJson(request);
+  const countRaw = await runtime.store.get("dcr:count");
+  const count = countRaw ? Number(countRaw) : 0;
+  if (!Number.isFinite(count) || count >= runtime.registrationQuota) {
+    return oauthJson({ error: "invalid_client_metadata", error_description: "dynamic client registration quota exceeded." }, 429);
+  }
   const redirects = stringArray(body.redirect_uris);
-  if (redirects.length === 0 || redirects.length > 8 || redirects.some((uri) => !redirectUriAllowed(uri))) {
+  if (redirects.length === 0 || redirects.length > 8 || redirects.some((uri) => !redirectUriAllowed(uri, runtime.pinnedRedirects))) {
     return oauthJson({ error: "invalid_client_metadata", error_description: "redirect_uris are missing or not allowed." }, 400);
   }
   const requestedMethod = typeof body.token_endpoint_auth_method === "string" ? body.token_endpoint_auth_method : "client_secret_basic";
@@ -397,6 +437,7 @@ async function register(request: Request, runtime: OAuthRuntime): Promise<Respon
     expiresAt,
   };
   await runtime.store.put(`client:${clientId}`, JSON.stringify(stored), expiresAt);
+  await runtime.store.put("dcr:count", String(count + 1));
   return oauthJson(
     {
       client_id: clientId,
@@ -420,7 +461,9 @@ async function authorize(request: Request, url: URL, runtime: OAuthRuntime): Pro
   const client = await findClient(runtime, params.get("client_id") ?? "");
   if (!client) return oauthJson({ error: "invalid_client" }, 401);
   const redirectUri = params.get("redirect_uri") ?? "";
-  if (!client.redirectUris.includes(redirectUri)) return oauthJson({ error: "invalid_request", error_description: "redirect_uri is not registered." }, 400);
+  if (!client.redirectUris.includes(redirectUri) || !redirectUriAllowed(redirectUri, runtime.pinnedRedirects)) {
+    return oauthJson({ error: "invalid_request", error_description: "redirect_uri is not registered." }, 400);
+  }
   if (params.get("code_challenge_method") !== "S256") {
     return oauthJson({ error: "invalid_request", error_description: "PKCE S256 is required." }, 400);
   }
@@ -458,15 +501,13 @@ async function authorize(request: Request, url: URL, runtime: OAuthRuntime): Pro
     });
     return redirect(location);
   }
-  return new Response(approvalPage(txnId, client.clientName ?? client.clientId, redirectUri), {
-    status: 200,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" },
-  });
+  return htmlDocument(approvalPage(txnId, client.clientId, client.clientName ?? client.clientId, redirectUri), 200);
 }
 
 async function approve(request: Request, runtime: OAuthRuntime): Promise<Response> {
-  if (!runtime.approvalSecret) return html("Owner approval is not configured.", 503);
   const form = await readForm(request);
+  if (form.get("csrf") != null) return submitConsent(runtime, form);
+  if (!runtime.approvalSecret) return html("Owner approval is not configured.", 503);
   const txnId = form.get("txn") ?? "";
   const secret = form.get("secret") ?? "";
   const raw = await runtime.store.get(`txn:${txnId}`);
@@ -482,8 +523,21 @@ async function approve(request: Request, runtime: OAuthRuntime): Promise<Respons
     return html("This approval request expired. Start the connection again.", 400);
   }
   if (!tokensEqual(runtime.approvalSecret, secret)) return html("Approval rejected.", 403);
+  const email = runtime.ownerEmails[0];
+  if (!email) return html("Set OWNER_EMAILS to use the approval secret.", 503);
   await runtime.store.delete(`txn:${txnId}`);
-  return finish(runtime, txn, "owner");
+  return finish(runtime, txn, email);
+}
+
+async function submitConsent(runtime: OAuthRuntime, form: URLSearchParams): Promise<Response> {
+  const consentId = form.get("consent") ?? "";
+  const csrf = form.get("csrf") ?? "";
+  const row = await takeJson<Consent>(runtime, `consent:${consentId}`);
+  if (!row || row.expiresAt <= runtime.now() || !safeEqual(row.csrf, csrf)) {
+    return html("This approval request expired. Start the connection again.", 400);
+  }
+  if (!emailAllowed(row.email, runtime.ownerEmails)) return html("This account cannot use this relay.", 403);
+  return finish(runtime, row, row.email);
 }
 
 async function googleCallback(url: URL, runtime: OAuthRuntime): Promise<Response> {
@@ -504,7 +558,20 @@ async function googleCallback(url: URL, runtime: OAuthRuntime): Promise<Response
       403,
     );
   }
-  return finish(runtime, txn, profile.email.toLowerCase());
+  const client = await findClient(runtime, txn.clientId);
+  const csrf = randomUrlToken(24);
+  const consentId = randomUrlToken(18);
+  const consent: Consent = {
+    ...txn,
+    email: profile.email.toLowerCase(),
+    csrf,
+    expiresAt: runtime.now() + TXN_TTL_MS,
+  };
+  await runtime.store.put(`consent:${consentId}`, JSON.stringify(consent), consent.expiresAt);
+  return htmlDocument(
+    consentPage(consentId, csrf, client?.clientId ?? txn.clientId, client?.clientName ?? txn.clientId, txn.redirectUri),
+    200,
+  );
 }
 
 async function finish(runtime: OAuthRuntime, txn: Txn, email: string): Promise<Response> {
@@ -566,7 +633,7 @@ async function revoke(request: Request, runtime: OAuthRuntime): Promise<Response
 
 async function revokeGrant(runtime: OAuthRuntime, hash: string): Promise<void> {
   // Keep a marker so an in-flight refresh cannot restore a usable grant.
-  await runtime.store.put(`revoked:${hash}`, "1", runtime.now() + REFRESH_TTL_MS + ACCESS_TTL_MS);
+  await runtime.store.put(`revoked:${hash}`, "1", runtime.now() + REFRESH_MAX_MS + ACCESS_TTL_MS);
   await runtime.store.delete(`refresh:${hash}`);
 }
 
@@ -589,13 +656,16 @@ async function exchangeRefresh(runtime: OAuthRuntime, client: StoredClient, form
   if (await runtime.store.get(`revoked:${hash}`)) return oauthJson({ error: "invalid_grant" }, 400);
   const raw = await runtime.store.get(`refresh:${hash}`);
   const row = raw ? (JSON.parse(raw) as RefreshRow) : null;
-  if (!row || row.expiresAt <= runtime.now() || row.clientId !== client.clientId) return oauthJson({ error: "invalid_grant" }, 400);
+  if (!row || row.clientId !== client.clientId) return oauthJson({ error: "invalid_grant" }, 400);
+  const createdAt = typeof row.createdAt === "number" ? row.createdAt : row.expiresAt - REFRESH_MAX_MS;
+  if (createdAt + REFRESH_MAX_MS <= runtime.now()) return oauthJson({ error: "invalid_grant" }, 400);
   if (!emailAllowed(row.email, runtime.ownerEmails)) return oauthJson({ error: "access_denied" }, 403);
   if (!runtime.staticClients.some((entry) => entry.clientId === client.clientId)) {
     const expiresAt = runtime.now() + CLIENT_TTL_MS;
     await runtime.store.put(`client:${client.clientId}`, JSON.stringify({ ...client, expiresAt }), expiresAt);
   }
-  return issueTokens(runtime, client.clientId, row.email, row.scope, refresh);
+  const stable: RefreshRow = { ...row, createdAt, expiresAt: createdAt + REFRESH_MAX_MS };
+  return issueTokens(runtime, client.clientId, row.email, row.scope, { refresh, row: stable });
 }
 
 async function issueTokens(
@@ -603,14 +673,29 @@ async function issueTokens(
   clientId: string,
   email: string,
   scope: string,
-  refresh = randomUrlToken(32),
+  existing?: { refresh: string; row: RefreshRow },
 ): Promise<Response> {
   const access = randomUrlToken(32);
+  const refresh = existing?.refresh ?? randomUrlToken(32);
   const refreshHash = sha256(refresh);
-  const accessRow: AccessRow = { clientId, email, scope, refreshHash, expiresAt: runtime.now() + ACCESS_TTL_MS };
-  const refreshRow: RefreshRow = { clientId, email, scope, expiresAt: runtime.now() + REFRESH_TTL_MS };
+  const now = runtime.now();
+  const refreshRow: RefreshRow = existing?.row ?? {
+    clientId,
+    email,
+    scope,
+    createdAt: now,
+    expiresAt: now + REFRESH_MAX_MS,
+  };
+  const accessRow: AccessRow = {
+    clientId,
+    email,
+    scope,
+    resource: runtime.resource,
+    refreshHash,
+    expiresAt: now + ACCESS_TTL_MS,
+  };
   await runtime.store.put(`access:${sha256(access)}`, JSON.stringify(accessRow), accessRow.expiresAt);
-  await runtime.store.put(`refresh:${refreshHash}`, JSON.stringify(refreshRow), refreshRow.expiresAt);
+  if (!existing) await runtime.store.put(`refresh:${refreshHash}`, JSON.stringify(refreshRow), refreshRow.expiresAt);
   if (await runtime.store.get(`revoked:${refreshHash}`)) {
     await runtime.store.delete(`refresh:${refreshHash}`);
     await runtime.store.delete(`access:${sha256(access)}`);
@@ -686,9 +771,8 @@ function decodeBasic(value: string): { id: string; secret: string } | null {
 }
 
 async function takeJson<T extends { expiresAt: number }>(runtime: OAuthRuntime, key: string): Promise<T | null> {
-  const raw = await runtime.store.get(key);
+  const raw = await runtime.store.take(key);
   if (!raw) return null;
-  await runtime.store.delete(key);
   try {
     const value = JSON.parse(raw) as T;
     if (value.expiresAt <= runtime.now()) return null;
@@ -696,6 +780,13 @@ async function takeJson<T extends { expiresAt: number }>(runtime: OAuthRuntime, 
   } catch {
     return null;
   }
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length || left.length === 0) return false;
+  return timingSafeEqual(left, right);
 }
 
 async function readJson(request: Request): Promise<Record<string, unknown>> {
@@ -755,29 +846,53 @@ function redirect(location: string): Response {
   });
 }
 
-function html(body: string, status: number): Response {
-  const page = `<!doctype html><html><head><meta charset="utf-8"><title>grokcode</title></head><body><p>${body}</p></body></html>`;
-  return new Response(page, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" },
-  });
+function htmlHeaders(): Record<string, string> {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+  };
 }
 
-function approvalPage(txnId: string, clientName: string, redirectUri: string): string {
-  let host = redirectUri;
-  try {
-    host = new URL(redirectUri).host;
-  } catch {
-    host = "the client";
-  }
+function html(body: string, status: number): Response {
+  const page = `<!doctype html><html><head><meta charset="utf-8"><title>grokcode</title></head><body><p>${body}</p></body></html>`;
+  return htmlDocument(page, status);
+}
+
+function htmlDocument(page: string, status: number): Response {
+  return new Response(page, { status, headers: htmlHeaders() });
+}
+
+function clientSummary(clientId: string, clientName: string, redirectUri: string): string {
+  return `<p>Client <strong>${escapeHtml(clientName)}</strong> (<code>${escapeHtml(clientId)}</code>) will receive the authorization code at <code>${escapeHtml(redirectUri)}</code>.</p>`;
+}
+
+function approvalPage(txnId: string, clientId: string, clientName: string, redirectUri: string): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Approve grokcode</title></head>
 <body>
 <h1>Approve shell access</h1>
-<p>Client <strong>${escapeHtml(clientName)}</strong> wants to run commands on your machines. Redirect host: ${escapeHtml(host)}.</p>
+${clientSummary(clientId, clientName, redirectUri)}
 <form method="post" action="/oauth/authorize">
 <input type="hidden" name="txn" value="${escapeHtml(txnId)}">
 <label>Owner approval secret <input type="password" name="secret" autocomplete="current-password" required></label>
+<button type="submit">Approve</button>
+</form>
+</body></html>`;
+}
+
+function consentPage(consentId: string, csrf: string, clientId: string, clientName: string, redirectUri: string): string {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Approve grokcode</title></head>
+<body>
+<h1>Approve shell access</h1>
+${clientSummary(clientId, clientName, redirectUri)}
+<form method="post" action="/oauth/authorize">
+<input type="hidden" name="consent" value="${escapeHtml(consentId)}">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
 <button type="submit">Approve</button>
 </form>
 </body></html>`;
