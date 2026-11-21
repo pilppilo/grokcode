@@ -9,7 +9,8 @@ import { runRelayConnection } from "./relay.js";
 import { listenDirect } from "./server.js";
 import { createOpenCodeService } from "./service.js";
 import { probeOpenCode } from "./supervisor.js";
-import { executeOp, type OpenCodeClient } from "grokcode-shared";
+import { detectPlatform, executeOp, isShellOp, type OpenCodeClient } from "grokcode-shared";
+import { createShellRuntime, policyFromFile } from "grokcode-shell";
 
 const VERSION = "0.1.0";
 
@@ -91,6 +92,22 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
   const served = endpointOf(ensured.baseUrl, endpoint.host, endpoint.port);
   const password = ensured.password();
   const home = homeFromEnv(env);
+  const shellHome = home ?? "/";
+  const policyPath =
+    env.GROKCODE_SHELL_POLICY?.trim() || (config.configDir ? path.join(config.configDir, "policy.json") : undefined);
+  const shellPlatform = detectPlatform();
+  const shell = createShellRuntime({
+    platform: shellPlatform,
+    home: shellHome,
+    loadPolicy: () => policyFromFile(policyPath, shellPlatform, shellHome),
+    ...(config.configDir ? { auditPath: path.join(config.configDir, "shell-audit.log") } : {}),
+  });
+  io.log(
+    policyPath
+      ? `Shell policy ${policyPath} (deny by default until that file loads).`
+      : "Shell policy is not configured. Shell and file tools stay denied.",
+  );
+  signal.addEventListener("abort", () => shell.killAll(), { once: true });
   const service = createOpenCodeService({
     baseUrl: ensured.baseUrl,
     host: served.host,
@@ -110,6 +127,7 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
   const getApi = () => service.getClient();
 
   const execute = async (op: string, params: unknown) => {
+    if (isShellOp(op)) return shell.execute(op, params);
     const shared = {
       allowDirs: config.allowDirs,
       opencodeControl: service.control,
