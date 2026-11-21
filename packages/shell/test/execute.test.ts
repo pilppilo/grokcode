@@ -139,6 +139,10 @@ test("files stay inside the roots and refuse symlink escapes", async () => {
     writeFileSync(code, 'const secret = requestedMethod;\nconst config = { password: options.password };\n');
     const source = await runtime.execute("shell_read_file", { path: code }) as { content: string };
     assert.equal(source.content, readFileSync(code, "utf8"));
+    const python = path.join(root, "source.py");
+    writeFileSync(python, 'password = options.password\nsecret = "abc"\npassword = ""\nsecret = "example-secret"\n');
+    const pythonSource = await runtime.execute("shell_read_file", { path: python }) as { content: string };
+    assert.equal(pythonSource.content, 'password = options.password\nsecret = "abc"\npassword = ""\nsecret = "[REDACTED]"\n');
     await assert.rejects(
       () =>
         runtime.execute("shell_apply_patch", {
@@ -251,6 +255,21 @@ test("a running job can be cancelled repeatedly", async () => {
     assert.equal(kills, 1);
   } finally {
     runtime.killAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing programs report spawn errors immediately", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-missing-program-"));
+  try {
+    const program = "grokcode-test-missing-program";
+    const runtime = runtimeFor(root, basePolicy(root, [{ command: program }]));
+    const started = await runtime.execute("shell_run", { cwd: root, argv: [program], timeoutMs: 10_000 }) as { jobId: string };
+    await new Promise((resolve) => setImmediate(resolve));
+    const job = await runtime.execute("shell_job", { jobId: started.jobId }) as { status: string; output: string };
+    assert.equal(job.status, "exited");
+    assert.match(job.output, /ENOENT/);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

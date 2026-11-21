@@ -70,8 +70,16 @@ export function resolveExecutable(file: string, platform: PathPlatform, env: Nod
 function wrap(child: ChildProcess, platform: PathPlatform, env: NodeJS.ProcessEnv): Spawned {
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
-  let spawnError: Error | undefined;
-  child.on("error", (error) => { spawnError ??= error; });
+  type ExitArgs = Parameters<Parameters<Spawned["onExit"]>[0]>;
+  let result: ExitArgs | undefined;
+  const listeners: Array<(...args: ExitArgs) => void> = [];
+  const finish = (...args: ExitArgs) => {
+    if (result) return;
+    result = args;
+    for (const listener of listeners.splice(0)) listener(...args);
+  };
+  child.on("error", (error) => finish(null, null, error));
+  child.once("close", (code, signal) => finish(code, signal));
   let killing = false;
   return {
     stdout: child.stdout,
@@ -97,7 +105,8 @@ function wrap(child: ChildProcess, platform: PathPlatform, env: NodeJS.ProcessEn
       }
     },
     onExit(cb) {
-      child.once("close", (code, signal) => cb(code, signal, spawnError));
+      if (result) cb(...result);
+      else listeners.push(cb);
     },
   };
 }
