@@ -212,9 +212,33 @@ test("metadata, dynamic registration, approval, and token checks", async () => {
     config,
   );
   assert.equal(refreshed.status, 200);
-  const next = (await refreshed.json()) as { access_token: string };
+  const next = (await refreshed.json()) as { access_token: string; refresh_token: string };
+  assert.equal(next.refresh_token, tokens.refresh_token);
   assert.notEqual(next.access_token, tokens.access_token);
   assert.ok(await accessTokenSubject(next.access_token, config, new Request("https://relay.example/gemini/mcp")));
+
+  const revoked = await handleOAuthRequest(
+    new Request("https://relay.example/oauth/revoke", {
+      method: "POST",
+      body: new URLSearchParams({ token: tokens.refresh_token, client_id: client.client_id }),
+    }),
+    config,
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(await accessTokenSubject(next.access_token, config, new Request("https://relay.example/gemini/mcp")), null);
+  const afterRevocation = await handleOAuthRequest(
+    new Request("https://relay.example/oauth/token", {
+      method: "POST",
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refresh_token,
+        client_id: client.client_id,
+      }),
+    }),
+    config,
+  );
+  assert.equal(afterRevocation.status, 400);
+  assert.deepEqual(await afterRevocation.json(), { error: "invalid_grant" });
 });
 
 test("google sign-in rejects a verified account that is not the owner", async () => {

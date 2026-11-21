@@ -50,6 +50,26 @@ async function toolText(response: Response): Promise<{ text: string; isError: bo
   return { text: body.result?.content?.[0]?.text ?? "", isError: body.result?.isError === true };
 }
 
+test("bounded shell results stay valid JSON and stateless endpoints reject GET", async () => {
+  const payload = { path: "/work/example.txt", content: "x".repeat(90_000) };
+  const options = {
+    backend: backend(),
+    preserveToolResults: true,
+    disableSse: true,
+    callTool: async () => payload,
+  };
+  const response = await handleMcpRequest(
+    post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_machines" } }),
+    options,
+  );
+  const { text, isError } = await toolText(response);
+  assert.equal(isError, false);
+  assert.deepEqual(JSON.parse(text), payload);
+  const get = await handleMcpRequest(new Request("https://relay.example/mcp"), options);
+  assert.equal(get.status, 405);
+  assert.match(get.headers.get("allow") ?? "", /POST/);
+});
+
 test("initialize and tools/list advertise the shared surface", async () => {
   const response = await handleMcpRequest(
     post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } }),
