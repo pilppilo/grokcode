@@ -1,3 +1,5 @@
+import { StringDecoder } from "node:string_decoder";
+
 import { ToolError, type PathPlatform } from "grokcode-shared";
 
 import { isSensitivePath, pathApi } from "./confine.js";
@@ -24,10 +26,10 @@ export async function gitStatus(
 }
 
 export async function gitInspect(
-  cwd: string, command: "diff" | "log", limit: number, ctx: FileContext, spawnImpl?: SpawnFn,
+  cwd: string, command: "diff" | "log", limit: number, ctx: FileContext, spawnImpl?: SpawnFn, staged = false,
 ): Promise<{ cwd: string; output: string; truncated: boolean }> {
   const args = command === "diff"
-    ? ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--cached"]
+    ? ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", ...(staged ? ["--cached"] : [])]
     : ["log", "--no-show-signature", "--no-notes", "--oneline", `--max-count=${limit}`];
   const decision = evaluateCommand(ctx.policy, ["git", ...args], { platform: ctx.platform, cwd, home: ctx.home });
   if (!decision.allow) throw new ToolError(decision.reason, "policy_denied");
@@ -43,13 +45,29 @@ export async function gitInspect(
     throw new ToolError(redact(location.output).trim() || "Cannot locate the Git directory.", "git_failed");
   }
   confineCwd(location.stdout.trimEnd(), ctx);
+  if (command === "diff" && !staged) {
+    const filters = await runAndWait({
+      ...common, argv: [...git, "config", "--null", "--name-only", "--get-regexp", "^filter\\."],
+    }, timeout, 4096, spawnImpl);
+    if (filters.timedOut || filters.truncated || (filters.code !== 0 && filters.code !== 1)) {
+      throw new ToolError("Could not inspect Git filters for a working-tree diff.", "git_failed");
+    }
+    const drivers = new Set<string>();
+    for (const key of filters.stdout.split("\0")) {
+      const name = /^filter\.(.+)\.(?:clean|process|required)$/.exec(key)?.[1];
+      if (name) drivers.add(name);
+    }
+    for (const name of drivers) {
+      git.push("-c", `filter.${name}.clean=`, "-c", `filter.${name}.process=`, "-c", `filter.${name}.required=false`);
+    }
+  }
   const result = await runAndWait({ ...common, argv: [...git, ...args] }, timeout, cap, spawnImpl);
   if (result.timedOut) throw new ToolError(`git ${command} timed out.`, "timeout");
   if (result.code !== 0 && !result.truncated) {
     throw new ToolError(redact(result.output).trim() || `git ${command} failed.`, "git_failed");
   }
   const output = redact(result.output);
-  return { cwd, output: Buffer.from(output).subarray(0, cap).toString("utf8"), truncated: result.truncated || Buffer.byteLength(output) > cap };
+  return { cwd, output: new StringDecoder("utf8").write(Buffer.from(output).subarray(0, cap)), truncated: result.truncated || Buffer.byteLength(output) > cap };
 }
 
 export async function gitCommit(
