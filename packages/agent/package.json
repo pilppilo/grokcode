@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "grokcode-shared": "0.1.0",
+    "grokcode-shell": "0.1.0",
     "ws": "^8.18.2"
   },
   "devDependencies": {

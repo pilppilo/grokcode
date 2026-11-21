@@ -1,7 +1,7 @@
 import { assertDirectoryAllowed, detectPlatform, directoryAllowed, type PathPlatform } from "./paths.js";
 import { parseToolOutputMode, type ToolOutputMode } from "./messages.js";
 import { OpenCodeClient, type FormView, type PermissionView, type ProjectInfo, type SessionSummary } from "./opencode.js";
-import { asRecord, assertId, isOpName, optionalString, requiredString, type OpName } from "./protocol.js";
+import { asRecord, assertId, isOpName, isShellOp, optionalString, requiredString, type OpName } from "./protocol.js";
 import { ToolError } from "./errors.js";
 
 export interface OpenCodeStatus {
@@ -164,6 +164,9 @@ async function filterForms(
  */
 export async function executeOp(ctxIn: ExecutorContext, op: string, params: unknown): Promise<unknown> {
   if (!isOpName(op)) throw new ToolError(`Unknown op ${op}.`, "unknown_op");
+  if (isShellOp(op)) {
+    throw new ToolError("Shell operations are handled by the shell bridge, not OpenCode.", "unknown_op");
+  }
   if (op === "opencode_status" || op === "start_opencode") {
     return runOpenCodeControl(ctxIn, op, params);
   }

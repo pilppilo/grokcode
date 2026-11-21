@@ -163,6 +163,15 @@ if (-not $NoStart) {
   Write-Host "Scheduled task GrokcodeAgent started."
 }
 
+$policyExample = Join-Path $InstallDir "packages\shell\policy.example.json"
+$policyCopy = Join-Path $configDir "policy.example.json"
+if ((Test-Path $policyExample) -and -not (Test-Path (Join-Path $configDir "policy.json"))) {
+  Copy-Item $policyExample $policyCopy -Force
+  Write-Host "Shell policy example: $policyCopy"
+  Write-Host "Copy it to $(Join-Path $configDir 'policy.json') and set roots before commands are allowed."
+  Write-Host "On this PC the shell is PowerShell 7 (pwsh). Run the agent as your user, not as Administrator."
+}
+
 Write-Host "Installed grokcode for machine $MachineName."
 Write-Host "Config: $envFile"
 if ($hasRelay) { Write-Host "Relay: configured" }

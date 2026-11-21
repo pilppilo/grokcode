@@ -10,7 +10,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "grokcode-shared": "0.1.0"
+    "grokcode-shared": "0.1.0",
+    "grokcode-shell": "0.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251108.0",
