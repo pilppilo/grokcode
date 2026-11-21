@@ -105,9 +105,12 @@ test("a filesystem root is not a valid policy root", () => {
   assert.throws(() => parsePolicy(JSON.stringify({ version: 1, roots: [] }), "posix", "/home/ada"), /non-empty/);
 });
 
-test("cmd shim quoting handles spaces and rejects ambiguous input", () => {
-  assert.equal(quoteCmdArg("hello"), "hello");
+test("cmd shim quoting quotes every argument and rejects command separators", () => {
+  assert.equal(quoteCmdArg("hello"), '"hello"');
   assert.equal(quoteCmdArg("a b"), '"a b"');
+  assert.throws(() => quoteCmdArg("a;b"));
+  assert.throws(() => quoteCmdArg("a,b"));
+  assert.throws(() => quoteCmdArg("a=b"));
   assert.throws(() => quoteCmdArg("100%"));
   assert.throws(() => quoteCmdArg('say "hi"'));
   assert.throws(() => quoteCmdArg("line\nline"));
@@ -118,13 +121,30 @@ test("relative paths and the example file live next to the package", () => {
 });
 
 test("search patterns, commit messages and refspecs are distinct from paths", () => {
-  const parsed = policy({ allow: [{ command: "git" }, { command: "rg" }] }, "win32", "C:\\Users\\ada");
+  const parsed = policy({
+    allow: [{ command: "git" }, { command: "rg" }],
+    git: { push: true, branches: ["codex/*"] },
+  }, "win32", "C:\\Users\\ada");
   const options = { platform: "win32" as const, cwd: "C:\\Work", home: "C:\\Users\\ada" };
   for (const argv of [
     ["rg", "/api/v1"], ["rg", "http://example.test"], ["rg", "agent.env"],
     ["git", "commit", "-m", "fix: foo"], ["git", "push", "origin", "HEAD:codex/bar"],
     ["git", "log", "main..HEAD"],
+    ["git", "diff", "--", ".gitignore"],
   ]) assert.equal(evaluateCommand(parsed, argv, options).allow, true, argv.join(" "));
   assert.equal(evaluateCommand(parsed, ["rg", "-equery", ".env"], options).allow, false);
   assert.equal(evaluateCommand(parsed, ["rg", "query", ".git/config"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, ["rg", "-uuu", "secret"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, ["rg", "--hidden", "--no-ignore", "secret"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, ["rg", "--glob", "*.env", "secret"], options).allow, false);
+  assert.match(evaluateCommand(parsed, ["git", "show", "HEAD:.env"], options).reason, /denied path/);
+  assert.match(evaluateCommand(parsed, ["git", "show", "HEAD:.git/config"], options).reason, /denied path/);
+  const noPush = policy({ allow: [{ command: "git" }] }, "win32", "C:\\Users\\ada");
+  assert.match(evaluateCommand(noPush, ["git", "push", "origin", "HEAD:codex/bar"], options).reason, /push/);
+  assert.equal(evaluateCommand(parsed, ["git", "push", "origin", "+HEAD:codex/bar"], options).allow, false);
+  assert.match(evaluateCommand(parsed, ["git", "push", "ext::sh -c id"], options).reason, /remote-helper/);
+  assert.equal(evaluateCommand(parsed, ["./git", "status"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, [".\\git.cmd", "status"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, ["git.cmd", "status"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, ["C:\\Windows\\System32\\git.exe", "status"], options).allow, false);
 });

@@ -102,8 +102,21 @@ export function listDir(input: string, ctx: FileContext): { path: string; entrie
   return { path: dir, entries: entries.slice(0, 500), truncated: entries.length > 500 };
 }
 
+/** A `.git` gitfile (`gitdir: ...`) points Git at another directory and can run that directory's hooks. */
+export function isGitdirPointer(contents: string): boolean {
+  return /^\uFEFF?\s*gitdir\s*:/i.test(contents);
+}
+
+function isGitSegment(part: string, platform: PathPlatform): boolean {
+  return platform === "win32" ? part.toLowerCase() === ".git" : part === ".git";
+}
+
 export function writeFile(input: string, contents: string, ctx: FileContext): { path: string; bytes: number } {
   if (typeof contents !== "string") throw new ToolError("contents must be a string.", "invalid_argument");
+  const segments = input.split(/[\\/]/).filter(Boolean);
+  if (segments.some((part) => isGitSegment(part, ctx.platform)) || (isGitdirPointer(contents) && isGitSegment(segments.at(-1) ?? "", ctx.platform))) {
+    throw new ToolError("gitdir files are denied.", "path_denied");
+  }
   const bytes = Buffer.byteLength(contents);
   if (bytes > ctx.policy.limits.maxWriteBytes) {
     throw new ToolError(`contents exceed the write cap of ${ctx.policy.limits.maxWriteBytes} bytes.`, "too_large");

@@ -46,6 +46,11 @@ function oauthStore(env: Env): OAuthStore {
     async delete(key) {
       await store.fetch("https://oauth.internal/delete", { method: "POST", body: JSON.stringify({ key }) });
     },
+    async take(key) {
+      const response = await store.fetch("https://oauth.internal/take", { method: "POST", body: JSON.stringify({ key }) });
+      const body = (await response.json()) as { value?: string | null };
+      return body.value ?? null;
+    },
   };
 }
 
@@ -59,6 +64,13 @@ function oauthConfig(env: Env): OAuthConfig {
       ? { google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET } }
       : {}),
     ...(env.PUBLIC_ORIGIN ? { publicOrigin: env.PUBLIC_ORIGIN } : {}),
+    ...(env.OAUTH_PINNED_REDIRECTS
+      ? {
+          pinnedRedirects: env.OAUTH_PINNED_REDIRECTS.split(/[\s,]+/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }
+      : {}),
   };
 }
 

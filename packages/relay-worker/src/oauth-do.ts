@@ -52,6 +52,17 @@ export class OAuthStoreDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec("DELETE FROM oauth_kv WHERE key = ?", key);
       return Response.json({ ok: true });
     }
+    if (url.pathname === "/take") {
+      const rows = this.ctx.storage.sql
+        .exec<{ value: string; expires_at: number | null }>(
+          "DELETE FROM oauth_kv WHERE key = ? RETURNING value, expires_at",
+          key,
+        )
+        .toArray();
+      const row = rows[0];
+      if (!row || (row.expires_at != null && row.expires_at <= Date.now())) return Response.json({ value: null });
+      return Response.json({ value: row.value });
+    }
     return new Response("not found", { status: 404 });
   }
 }
