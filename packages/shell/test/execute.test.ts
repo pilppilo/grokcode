@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -108,6 +108,16 @@ test("files stay inside the roots and refuse symlink escapes", async () => {
       patch: ["--- a/lines.txt", "+++ b/lines.txt", "@@ -1,3 +1,3 @@", " one", "", "-three", "+four", ""].join("\n"),
     });
     assert.equal(readFileSync(linesPath, "utf8"), "one\n\nfour\n");
+    await runtime.execute("shell_apply_patch", {
+      cwd: root,
+      patch: [
+        "--- a/lines.txt", "+++ b/lines.txt", "@@ -3 +3 @@", "-four", "+five", "",
+        "--- a/note.txt", "+++ b/note.txt", "@@ -1 +1 @@", "-alpha", "+updated", "",
+      ].join("\n"),
+    });
+    assert.equal(readFileSync(linesPath, "utf8"), "one\n\nfive\n");
+    assert.equal(readFileSync(file, "utf8"), "updated\n");
+    writeFileSync(file, "alpha\n");
     const listed = (await runtime.execute("shell_list_dir", { path: root })) as { entries: Array<{ name: string }> };
     assert.ok(listed.entries.some((entry) => entry.name === "note.txt"));
     await assert.rejects(
@@ -131,7 +141,7 @@ test("files stay inside the roots and refuse symlink escapes", async () => {
       cwd: root,
       patch: [
         "--- a/note.txt", "+++ b/note.txt", "@@ -1 +1 @@", "-beta", "+gamma",
-        "--- a/inside.txt", "+++ b/inside.txt", "@@ -1 +1 @@", "-wrong", "+next", "",
+        "", "--- a/inside.txt", "+++ b/inside.txt", "@@ -1 +1 @@", "-wrong", "+next", "",
       ].join("\n"),
     }), ToolError);
     assert.equal(readFileSync(file, "utf8"), "beta\n");
@@ -182,8 +192,14 @@ test("git_commit_push respects the branch allowlist", async () => {
       push: false,
     })) as { branch: string };
     assert.equal(committed.branch, "cursor/test");
-    const diff = await runtime.execute("shell_git_diff", { cwd: root }) as { output: string };
+    const diff = await runtime.execute("shell_git_diff", { cwd: root, staged: true }) as { output: string };
     assert.match(diff.output, /staged\.txt/);
+    writeFileSync(path.join(root, ".gitattributes"), "note.txt filter=untrusted\n");
+    execFileSync("git", ["config", "filter.untrusted.clean", "false"], { cwd: root });
+    execFileSync("git", ["config", "filter.untrusted.required", "true"], { cwd: root });
+    writeFileSync(path.join(root, "note.txt"), "unstaged edit\n");
+    const unstaged = await runtime.execute("shell_git_diff", { cwd: root }) as { output: string };
+    assert.match(unstaged.output, /unstaged edit/);
     const log = await runtime.execute("shell_git_log", { cwd: root, limit: 1 }) as { output: string };
     assert.match(log.output, /add note/);
     assert.equal(execFileSync("git", ["show", "--format=", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" }).trim(), "note.txt");
@@ -213,7 +229,9 @@ test("file search skips hidden and sensitive paths and returns line numbers", as
   const root = mkdtempSync(path.join(tmpdir(), "grokcode-search-"));
   try {
     const runtime = runtimeFor(root, basePolicy(root, [{ command: "rg" }]));
-    writeFileSync(path.join(root, "note.txt"), "first\nmatch here\n");
+    writeFileSync(path.join(root, "note.txt"), `${"a".repeat(33_000)}\nmatch here\n`);
+    mkdirSync(path.join(root, "node_modules"));
+    writeFileSync(path.join(root, "node_modules", "dep.txt"), "match here\n");
     writeFileSync(path.join(root, ".env"), "match here\n");
     writeFileSync(path.join(root, "hidden.pem"), "match here\n");
     const found = await runtime.execute("shell_search_files", { cwd: root, query: "match", glob: "*.*" }) as {

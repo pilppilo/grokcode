@@ -22,11 +22,32 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
   const files: FilePatch[] = [];
   let current: FilePatch | undefined;
   let hunk: Hunk | undefined;
+  let oldCount = 0;
+  let newCount = 0;
   const flushHunk = () => {
-    if (hunk && current) current.hunks.push(hunk);
+    if (hunk && current) {
+      if (hunk.oldLines.length !== oldCount || hunk.newLines.length !== newCount) {
+        throw new ToolError("patch hunk line counts do not match its header.", "invalid_patch");
+      }
+      current.hunks.push(hunk);
+    }
     hunk = undefined;
   };
   for (const line of lines) {
+    if (hunk && hunk.oldLines.length === oldCount && hunk.newLines.length === newCount) flushHunk();
+    if (hunk) {
+      if (line.startsWith("\\")) continue;
+      const marker = line[0] ?? " ";
+      if (marker !== "+" && marker !== "-" && marker !== " ") {
+        throw new ToolError("patch contains a line that is not part of a hunk.", "invalid_patch");
+      }
+      if (marker !== "+") hunk.oldLines.push(line.slice(1));
+      if (marker !== "-") hunk.newLines.push(line.slice(1));
+      if (hunk.oldLines.length > oldCount || hunk.newLines.length > newCount) {
+        throw new ToolError("patch hunk exceeds its declared line counts.", "invalid_patch");
+      }
+      continue;
+    }
     if (line.startsWith("diff --git ") || line.startsWith("index ") || line.startsWith("new file") || line.startsWith("deleted file") || line.startsWith("similarity ") || line.startsWith("rename ") || line.startsWith("old mode") || line.startsWith("new mode")) {
       flushHunk();
       if (line.startsWith("diff --git ")) current = undefined;
@@ -46,30 +67,16 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
     if (line.startsWith("@@")) {
       if (!current) throw new ToolError("patch hunk is missing a file header.", "invalid_patch");
       flushHunk();
-      const match = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s@@/.exec(line);
+      const match = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s@@/.exec(line);
       if (!match) throw new ToolError("patch hunk header is invalid.", "invalid_patch");
+      oldCount = Number(match[2] ?? 1);
+      newCount = Number(match[4] ?? 1);
       hunk = { oldStart: Number(match[1]), oldLines: [], newLines: [] };
       continue;
     }
-    if (!hunk) {
-      if (line === "" || line.startsWith("\\")) continue;
-      continue;
+    if (!hunk && line !== "" && /^[+-]/.test(line)) {
+      throw new ToolError("patch contains data beyond its hunk counts.", "invalid_patch");
     }
-    if (line.startsWith("\\")) continue;
-    if (line.startsWith("+")) {
-      hunk.newLines.push(line.slice(1));
-      continue;
-    }
-    if (line.startsWith("-")) {
-      hunk.oldLines.push(line.slice(1));
-      continue;
-    }
-    if (line === "" || line.startsWith(" ")) {
-      hunk.oldLines.push(line.slice(1));
-      hunk.newLines.push(line.slice(1));
-      continue;
-    }
-    throw new ToolError("patch contains a line that is not part of a hunk.", "invalid_patch");
   }
   flushHunk();
   if (files.length === 0) throw new ToolError("patch does not contain a file.", "invalid_patch");
