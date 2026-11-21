@@ -21,8 +21,7 @@ export interface Env {
    */
   PUBLIC_ORIGIN?: string;
   /**
-   * Optional exact redirect URIs, comma-separated. Leave unset until the first
-   * Gemini dynamic registration, then pin the `/r/...` or `/a/...` URI it used.
+   * Exact redirect URIs, comma-separated. Configure before registering a client.
    */
   OAUTH_PINNED_REDIRECTS?: string;
 }

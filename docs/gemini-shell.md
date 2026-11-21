@@ -26,7 +26,7 @@ Nothing in this repository is deployed for you, and no real token belongs in git
 
 `@cloudflare/workers-oauth-provider` owns the worker entrypoint and treats its API route as OAuth-only. That would reject Antigravity's static bearer and wrap `/mcp` and `/agent`. The worker therefore implements the OAuth 2.1 surface itself: RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. A refresh token is stable: every refresh returns that same token. It expires 90 days after it was created, and a refresh does not move that deadline. Access tokens last one hour and are bound to `https://<origin>/gemini/mcp`. Clients can revoke tokens at `/oauth/revoke`. Dynamic registration is capped (50 clients unless the process is restarted with a fresh store).
 
-Redirect URIs on Google's Connected Apps hosts (`oauth-redirect.googleusercontent.com`, the sandbox host, and the test host) must use a `/r/` or `/a/` path, which is what Gemini Custom Apps and Antigravity generate. Localhost is also allowed for development. After the first registration you can set `OAUTH_PINNED_REDIRECTS` to the exact URI. Set `PUBLIC_ORIGIN` to the origin clients use when the worker's request host is not that URL (a custom domain, or a proxy in front of `*.workers.dev`).
+Redirect URIs on Google's Connected Apps hosts (`oauth-redirect.googleusercontent.com`, the sandbox host, and the test host) must use a `/r/` or `/a/` path, which is what Gemini Custom Apps and Antigravity generate. Localhost is also allowed for development. Before registration, set `OAUTH_PINNED_REDIRECTS` to the exact URI. Set `PUBLIC_ORIGIN` to the origin clients use when the worker's request host is not that URL (a custom domain, or a proxy in front of `*.workers.dev`).
 
 Google sign-in does not issue a code immediately. After the Google account is accepted, the browser shows a consent page with the client name, client id, and the exact redirect URI. The form carries a one-time CSRF token. `OWNER_APPROVAL_SECRET` is ignored while Google sign-in is configured, and it never mints a token whose subject skips `OWNER_EMAILS`.
 
@@ -71,7 +71,7 @@ npx wrangler secret put PUBLIC_ORIGIN
 # https://shell.example.com
 ```
 
-After the first dynamic registration, pin that app's redirect URI:
+Before registration, configure the exact callback URI supplied by each client:
 
 ```bash
 npx wrangler secret put OAUTH_PINNED_REDIRECTS
