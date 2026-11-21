@@ -3,7 +3,7 @@ import { HubError, errorCode, errorMessage, type MachineInfo } from "grokcode-sh
 import { RelayHubDO } from "./durable.js";
 import type { Env } from "./env.js";
 import { handleRelayRequest } from "./http.js";
-import { isOAuthPath, parseOwnerEmails, parseStaticClients, type OAuthConfig, type OAuthStore } from "./oauth.js";
+import { GEMINI_MCP_PATH, isOAuthPath, parseOwnerEmails, parseStaticClients, type OAuthConfig, type OAuthStore } from "./oauth.js";
 import { OAuthStoreDO } from "./oauth-do.js";
 
 export { RelayHubDO, OAuthStoreDO };
@@ -75,9 +75,9 @@ export default {
     let oauth: OAuthConfig | undefined;
     try {
       oauth = oauthConfig(env);
-    } catch (err) {
-      if (isOAuthPath(url.pathname)) {
-        return new Response(errorMessage(err), { status: 500, headers: { "cache-control": "no-store" } });
+    } catch {
+      if (isOAuthPath(url.pathname) || url.pathname.replace(/\/+$/, "") === GEMINI_MCP_PATH) {
+        return new Response("OAuth configuration is invalid. Check OAUTH_CLIENTS.\n", { status: 500, headers: { "cache-control": "no-store" } });
       }
       oauth = undefined;
     }
