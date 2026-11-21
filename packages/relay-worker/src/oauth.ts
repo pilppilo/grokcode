@@ -84,7 +84,7 @@ export interface OAuthConfig {
   identity?: IdentityProvider;
   google?: { clientId: string; clientSecret: string };
   publicOrigin?: string;
-  /** Exact redirect URIs required for registration and authorization. */
+  /** Optional exact redirect URIs for registration and authorization. */
   pinnedRedirects?: string[];
   /** Cap on dynamic client registrations stored by this worker. Default 50. */
   registrationQuota?: number;
@@ -163,7 +163,9 @@ export function pkceS256(verifier: string): string {
 }
 
 export function redirectUriAllowed(uri: string, pinned?: readonly string[]): boolean {
-  return pinned?.includes(uri) === true && validRedirectUri(uri);
+  if (!validRedirectUri(uri)) return false;
+  if (pinned?.length) return pinned.includes(uri);
+  return new URL(uri).origin === "https://oauth-redirect.googleusercontent.com";
 }
 
 function validRedirectUri(uri: string): boolean {
