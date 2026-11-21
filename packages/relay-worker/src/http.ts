@@ -110,6 +110,7 @@ async function handleGemini(request: Request, options: RelayHttpOptions): Promis
       headers: {
         "content-type": "text/plain; charset=utf-8",
         "www-authenticate": wwwAuthenticate(origin, error),
+        "access-control-allow-origin": "*",
         "access-control-expose-headers": "WWW-Authenticate",
         "cache-control": "no-store",
       },
@@ -129,6 +130,8 @@ function geminiMcpOptions(options: RelayHttpOptions) {
     maxSyncWaitMs: clamp(options.maxSyncWaitMs),
     checkOrigin: false,
     tools: SHELL_TOOLS,
+    preserveToolResults: true,
+    disableSse: true,
     callTool: (name: string, args: unknown) => callShellTool(backend, name, args, { maxSyncWaitMs: clamp(options.maxSyncWaitMs) }),
     serverName: SHELL_SERVER_NAME,
     serverVersion: SHELL_SERVER_VERSION,
