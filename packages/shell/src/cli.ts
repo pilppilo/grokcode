@@ -8,13 +8,14 @@ import type { Readable, Writable } from "node:stream";
 import { detectPlatform } from "grokcode-shared";
 
 import { createShellRuntime, policyFromFile } from "./execute.js";
+import { reapDetachedChildren } from "./spawn.js";
 import { createFrameParser, encodeFrame, handleStdioMessage, localBackend } from "./stdio.js";
 
 const VERSION = "0.1.0";
 
 export const HELP = `grokcode-shell — local stdio MCP server for the Antigravity CLI
 
-Speaks MCP over stdin/stdout (Content-Length frames, or one JSON object per line).
+Speaks MCP over stdin/stdout as newline-delimited JSON (one JSON object per line).
 The same tools are available remotely at https://<worker>/gemini/mcp.
 
   grokcode-shell --policy ~/.config/grokcode/policy.json --name expinsider
@@ -30,6 +31,26 @@ Options:
 The process denies every command and file path until a policy with roots is loaded.
 Run it as a normal user, not an administrator or root.
 `;
+
+/** Serialize stdout writes so two responses cannot interleave their frames. */
+export function createWriteQueue(
+  write: (chunk: Buffer, cb: (error?: Error | null) => void) => void,
+): (chunk: Buffer) => Promise<void> {
+  let chain = Promise.resolve();
+  return (chunk) => {
+    const run = chain.then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          write(chunk, (error) => (error ? reject(error) : resolve()));
+        }),
+    );
+    chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}
 
 export interface StdioIo {
   stdin: Readable;
@@ -70,19 +91,25 @@ export async function runStdio(argv: string[], env: NodeJS.ProcessEnv, io: Stdio
   const home = homeFrom(env);
   const policyPath = parsed.values.policy ?? defaultPolicy(env);
   const name = parsed.values.name ?? (env.GROKCODE_MACHINE_NAME?.trim() || "local");
+  const auditPath = path.join(path.dirname(policyPath), "shell-audit.log");
   const runtime = createShellRuntime({
     platform,
     home,
     loadPolicy: () => policyFromFile(policyPath, platform, home),
-    auditPath: path.join(path.dirname(policyPath), "shell-audit.log"),
+    auditPath,
+    protectedPaths: [policyPath, auditPath],
   });
   const backend = localBackend(name, runtime);
+  const writeStdout = createWriteQueue((chunk, cb) => {
+    io.stdout.write(chunk, cb);
+  });
   io.stderr.write(`grokcode-shell ${VERSION} as ${name}. Policy ${policyPath}.\n`);
   const parser = createFrameParser(
     (message) => {
       void handleStdioMessage(message, backend)
         .then((response) => {
-          if (response !== undefined) io.stdout.write(encodeFrame(response));
+          if (response !== undefined) return writeStdout(encodeFrame(response));
+          return undefined;
         })
         .catch((err: unknown) => {
           io.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
@@ -90,6 +117,15 @@ export async function runStdio(argv: string[], env: NodeJS.ProcessEnv, io: Stdio
     },
     (err) => io.stderr.write(`${err.message}\n`),
   );
+  const stop = (code: number) => {
+    runtime.killAll();
+    process.exit(code);
+  };
+  if (invokedDirectly) {
+    process.once("SIGINT", () => stop(130));
+    process.once("SIGTERM", () => stop(143));
+    process.on("exit", () => reapDetachedChildren());
+  }
   io.stdin.on("data", (chunk: Buffer | string) => {
     parser(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   });

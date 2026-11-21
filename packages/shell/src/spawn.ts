@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { Readable } from "node:stream";
+import fs, { existsSync } from "node:fs";
+import pathPosix from "node:path/posix";
 import pathWin32 from "node:path/win32";
+import { Readable } from "node:stream";
 
-import type { PathPlatform } from "grokcode-shared";
+import { ToolError, type PathPlatform } from "grokcode-shared";
+
+import { isBareCommandName, withinRoots } from "./confine.js";
 
 export interface SpawnSpec {
   argv: string[];
@@ -13,58 +16,223 @@ export interface SpawnSpec {
   /** Shell command text. Required when shell is true. */
   command?: string;
   env?: NodeJS.ProcessEnv;
+  /** Policy roots. A resolved binary inside one of these is refused. */
+  roots?: readonly string[];
 }
 
 export interface Spawned {
   stdout: Readable | null;
   stderr: Readable | null;
-  kill(signal?: NodeJS.Signals): void;
+  kill(signal?: NodeJS.Signals): void | Promise<void>;
   onExit(cb: (code: number | null, signal: NodeJS.Signals | null, error?: Error) => void): void;
 }
 
 export type SpawnFn = (spec: SpawnSpec) => Spawned;
 
+/**
+ * Names copied into a child. Everything else is dropped, including GIT_*,
+ * LD_PRELOAD, LD_LIBRARY_PATH, DYLD_*, NODE_OPTIONS, RIPGREP_CONFIG_PATH,
+ * BASH_ENV, and PYTHONPATH. Safe git variables are set again below.
+ */
+const ENV_ALLOW = [
+  "PATH",
+  "Path",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "SystemRoot",
+  "WINDIR",
+  "SYSTEMDRIVE",
+  "ComSpec",
+  "COMSPEC",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "LANG",
+  "LC_CTYPE",
+  "USER",
+  "USERNAME",
+  "LOGNAME",
+  "PATHEXT",
+  "TERM",
+  "TZ",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "COMMONPROGRAMFILES",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  "OS",
+  "GROKCODE_PWSH",
+] as const;
+
+export function sanitizePath(value: string, platform: PathPlatform): string {
+  const path = platform === "win32" ? pathWin32 : pathPosix;
+  const sep = platform === "win32" ? ";" : ":";
+  return value
+    .split(sep)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "" && entry !== "." && entry !== ".." && path.isAbsolute(entry))
+    .join(sep);
+}
+
+/** The operator PATH with `.` and relative entries removed. Command lookup uses this, not the child environment. */
+export function trustedPath(platform: PathPlatform): string {
+  return sanitizePath(process.env.PATH || process.env.Path || "", platform);
+}
+
 export function childEnv(base: NodeJS.ProcessEnv, platform: PathPlatform): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base };
-  delete env.BASH_ENV;
-  delete env.ENV;
-  delete env.SHELLOPTS;
-  delete env.PS4;
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ENV_ALLOW) {
+    const value = base[key];
+    if (typeof value === "string" && value.length > 0) env[key] = value;
+  }
+  const cleaned = sanitizePath(base.PATH || base.Path || "", platform);
+  if (cleaned) {
+    env.PATH = cleaned;
+    if (platform === "win32") env.Path = cleaned;
+  }
   env.PYTHONIOENCODING = "utf-8";
   env.PYTHONUTF8 = "1";
   env.LANG = "C.UTF-8";
   env.LC_ALL = "C.UTF-8";
   env.GIT_TERMINAL_PROMPT = "0";
   env.GCM_INTERACTIVE = "Never";
+  env.HUSKY = "0";
   if (platform === "win32") env.LESSCHARSET = "utf-8";
   return env;
 }
 
-/** Quote an argument from the conservative subset supported by Windows batch shims. */
+/**
+ * Quote one argument for a future Windows script shim.
+ * Every argument is quoted. `;`, `,`, and `=` are rejected because cmd.exe
+ * can treat them as separators even inside the `/c` string. `%`, quotes, and
+ * control characters are rejected too.
+ *
+ * `.cmd` / `.bat` shims are denied today (git and rg are `.exe`). If
+ * `SCRIPT_SHIM_ALLOWLIST` later gains npm, pnpm, or npx, this reject list
+ * stays in force.
+ */
 export function quoteCmdArg(arg: string): string {
-  if (/["%\x00-\x1f]/.test(arg)) {
-    throw new Error("Windows batch arguments cannot contain quotes, percent signs, or control characters.");
+  if (/["%;,=\x00-\x1f]/.test(arg)) {
+    throw new Error(
+      "Windows batch arguments cannot contain quotes, percent signs, semicolons, commas, equals signs, or control characters.",
+    );
   }
-  if (!arg || /[\s&|<>^!()]/.test(arg)) return `"${arg}"`;
-  return arg;
+  return `"${arg}"`;
 }
 
 /**
- * On Windows, `CreateProcess` will not run a `.cmd` or `.bat` directly.
- * Resolve `git` to `git.exe` or `git.cmd` and wrap the cmd shims. `.ps1` is never selected.
+ * Empty on purpose. Add "npm", "pnpm", or "npx" here to resolve those Windows
+ * shims, and keep quoteCmdArg's rejects for `;`, `,`, and `=`.
  */
-export function resolveExecutable(file: string, platform: PathPlatform, env: NodeJS.ProcessEnv): string {
-  if (platform !== "win32") return file;
-  if (/[\\/]/.test(file) || pathWin32.extname(file)) return file;
-  const pathEnv = env.PATH || env.Path || "";
-  for (const dir of pathEnv.split(";")) {
+export const SCRIPT_SHIM_ALLOWLIST: ReadonlySet<string> = new Set<string>();
+
+export interface ResolveCommandOptions {
+  platform: PathPlatform;
+  pathEnv: string;
+  roots: readonly string[];
+  exists?: (file: string) => boolean;
+  realpath?: (file: string) => string;
+}
+
+/** Resolve a bare command from a fixed PATH. Refuse script shims and anything that lands inside a policy root. */
+export function resolveTrustedCommand(name: string, options: ResolveCommandOptions): string {
+  if (!isBareCommandName(name)) throw new ToolError("command must be a bare name with no path.", "policy_denied");
+  if (/\.(?:cmd|bat|com)$/i.test(name)) {
+    throw new ToolError("Windows script shims (.cmd, .bat, .com) are denied.", "policy_denied");
+  }
+  const path = options.platform === "win32" ? pathWin32 : pathPosix;
+  const exists = options.exists ?? existsSync;
+  const realpath =
+    options.realpath ??
+    ((file: string) => {
+      try {
+        return fs.realpathSync.native(file);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") throw err;
+        return fs.realpathSync(file);
+      }
+    });
+  const base = options.platform === "win32" ? name.toLowerCase().replace(/\.exe$/i, "") : name;
+  const names =
+    options.platform === "win32"
+      ? pathWin32.extname(name).toLowerCase() === ".exe"
+        ? [name]
+        : [`${base}.exe`]
+      : [name];
+  if (SCRIPT_SHIM_ALLOWLIST.has(base)) names.push(`${base}.cmd`, `${base}.bat`);
+  const sep = options.platform === "win32" ? ";" : ":";
+  for (const dir of sanitizePath(options.pathEnv, options.platform).split(sep)) {
     if (!dir) continue;
-    for (const ext of [".exe", ".cmd", ".bat"]) {
-      const candidate = pathWin32.join(dir, file + ext);
-      if (existsSync(candidate)) return candidate;
+    if (withinRoots(dir, options.roots, options.platform)) continue;
+    for (const candidate of names) {
+      const full = path.join(dir, candidate);
+      if (!exists(full)) continue;
+      let real: string;
+      try {
+        real = realpath(full);
+      } catch {
+        continue;
+      }
+      if (withinRoots(real, options.roots, options.platform)) {
+        throw new ToolError("command resolves inside a policy root.", "policy_denied");
+      }
+      if (/\.(?:cmd|bat|com)$/i.test(real) && !SCRIPT_SHIM_ALLOWLIST.has(base)) {
+        throw new ToolError("Windows script shims (.cmd, .bat, .com) are denied.", "policy_denied");
+      }
+      return real;
     }
   }
-  return file;
+  throw new ToolError(`command was not found on PATH: ${name}`, "not_found");
+}
+
+const detachedChildren = new Set<ChildProcess>();
+
+function trackChild(child: ChildProcess): void {
+  detachedChildren.add(child);
+  const drop = () => detachedChildren.delete(child);
+  child.once("exit", drop);
+  child.once("error", drop);
+}
+
+/** Kill process groups left behind by detached spawns. Called on shutdown. */
+export function reapDetachedChildren(): void {
+  for (const child of detachedChildren) {
+    const pid = child.pid;
+    if (!pid) continue;
+    try {
+      if (process.platform !== "win32") process.kill(-pid, "SIGKILL");
+      else child.kill("SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  detachedChildren.clear();
+}
+
+/**
+ * Resolve a Windows command to `name.exe` only.
+ * `.cmd`, `.bat`, and `.com` are not selected. See `SCRIPT_SHIM_ALLOWLIST`.
+ */
+export function resolveExecutable(file: string, platform: PathPlatform, env: NodeJS.ProcessEnv): string {
+  if (!isBareCommandName(file)) return file;
+  if (/\.(?:cmd|bat|com)$/i.test(file)) return file;
+  try {
+    return resolveTrustedCommand(file, {
+      platform,
+      pathEnv: env.PATH || env.Path || trustedPath(platform),
+      roots: [],
+    });
+  } catch {
+    return file;
+  }
 }
 
 function wrap(child: ChildProcess, platform: PathPlatform, env: NodeJS.ProcessEnv): Spawned {
@@ -121,6 +289,10 @@ export function defaultSpawn(spec: SpawnSpec): Spawned {
     detached: spec.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
   };
+  const launch = (child: ChildProcess) => {
+    trackChild(child);
+    return wrap(child, spec.platform, env);
+  };
   if (spec.shell) {
     const command = spec.command ?? "";
     if (spec.platform === "win32") {
@@ -130,26 +302,33 @@ export function defaultSpawn(spec: SpawnSpec): Spawned {
         "$OutputEncoding = [Console]::OutputEncoding",
         command,
       ].join("\n");
-      return wrap(spawn(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], options), spec.platform, env);
+      return launch(spawn(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], options));
     }
-    return wrap(spawn("bash", ["--noprofile", "--norc", "-c", command], options), spec.platform, env);
+    return launch(spawn("bash", ["--noprofile", "--norc", "-c", command], options));
   }
-  const [file, ...args] = spec.argv;
+  let [file, ...args] = spec.argv;
   if (!file) throw new Error("argv is empty");
-  const resolved = resolveExecutable(file, spec.platform, env);
-  if (spec.platform === "win32" && /\.(cmd|bat)$/i.test(resolved)) {
+  if (/\.(?:cmd|bat|com)$/i.test(file)) {
+    const base = (spec.platform === "win32" ? pathWin32 : pathPosix).basename(file, (spec.platform === "win32" ? pathWin32 : pathPosix).extname(file)).toLowerCase();
+    if (!SCRIPT_SHIM_ALLOWLIST.has(base)) {
+      throw new Error("Windows script shims (.cmd, .bat, .com) are denied.");
+    }
+    // Future npm/pnpm/npx shims: quoteCmdArg rejects `;`, `,`, and `=`.
     const comspec = env.ComSpec || "cmd.exe";
-    const line = [resolved, ...args].map(quoteCmdArg).join(" ");
-    return wrap(
-      spawn(comspec, ["/d", "/v:off", "/s", "/c", `"${line}"`], {
-        ...options,
-        windowsVerbatimArguments: true,
-      }),
-      spec.platform,
-      env,
-    );
+    const line = [file, ...args].map(quoteCmdArg).join(" ");
+    return launch(spawn(comspec, ["/d", "/v:off", "/s", "/c", `"${line}"`], { ...options, windowsVerbatimArguments: true }));
   }
-  return wrap(spawn(resolved, args, options), spec.platform, env);
+  const path = spec.platform === "win32" ? pathWin32 : pathPosix;
+  if (!path.isAbsolute(file)) {
+    file = resolveTrustedCommand(file, {
+      platform: spec.platform,
+      pathEnv: trustedPath(spec.platform),
+      roots: spec.roots ?? [],
+    });
+  } else if (spec.roots && withinRoots(file, spec.roots, spec.platform)) {
+    throw new Error("command resolves inside a policy root.");
+  }
+  return launch(spawn(file, args, options));
 }
 
 export async function runAndWait(
@@ -182,12 +361,22 @@ export async function runAndWait(
       if (timer) clearTimeout(timer);
       resolve({ code, timedOut });
     };
+    let timingOut = false;
     timer = setTimeout(() => {
-      spawned.kill("SIGTERM");
-      finish(null, true);
+      timingOut = true;
+      const grace = setTimeout(() => finish(null, true), 500);
+      spawned.onExit(() => {
+        clearTimeout(grace);
+        finish(null, true);
+      });
+      void Promise.resolve(spawned.kill("SIGTERM")).catch(() => {
+        clearTimeout(grace);
+        finish(null, true);
+      });
     }, timeoutMs);
     spawned.onExit((code, _signal, error) => {
       if (error) stderr += error.message;
+      if (timingOut) return;
       finish(code, false);
     });
   });

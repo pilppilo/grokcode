@@ -21,8 +21,33 @@ export interface JobView {
 
 interface Job extends Omit<JobView, "nextOffset"> {
   raw: string;
-  kill: () => void;
+  kill: () => void | Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
+}
+
+/** Cut on a UTF-8 boundary so a multibyte character is not split. */
+export function clipUtf8(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const buf = Buffer.from(text);
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end - 1]! & 0xc0) === 0x80) end--;
+  if (end > 0) {
+    const lead = buf[end - 1]!;
+    if (lead >= 0x80) {
+      const width = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+      end = end - 1 + width <= maxBytes ? end - 1 + width : end - 1;
+    }
+  }
+  return buf.subarray(0, end).toString("utf8");
+}
+
+/** Hold the trailing partial line so a secret split across chunks is not published early. */
+function visibleRaw(raw: string, done: boolean): string {
+  if (done) return raw;
+  const nl = raw.lastIndexOf("\n");
+  if (nl === -1) return "";
+  return raw.slice(0, nl + 1);
 }
 
 export class JobTable {
@@ -51,32 +76,38 @@ export class JobTable {
       timedOut: false,
       kill: () => spawned.kill("SIGTERM"),
     };
+    const publish = (done: boolean) => {
+      job.output = redact(visibleRaw(job.raw, done));
+    };
     const push = (chunk: string) => {
       if (job.truncated) return;
       job.raw += chunk;
       if (Buffer.byteLength(job.raw) > maxOutput) {
-        job.raw = job.raw.slice(0, maxOutput);
+        job.raw = clipUtf8(job.raw, maxOutput);
         job.truncated = true;
-        job.kill();
+        void job.kill();
       }
-      job.output = redact(job.raw);
+      publish(false);
     };
     spawned.stdout?.on("data", (chunk: string) => push(String(chunk)));
     spawned.stderr?.on("data", (chunk: string) => push(String(chunk)));
     job.timer = setTimeout(() => {
       if (job.status !== "running") return;
-      job.status = "timed_out";
       job.timedOut = true;
-      job.finishedAt = this.now();
-      job.kill();
+      void Promise.resolve(job.kill()).then(() => {
+        if (job.status !== "running") return;
+        job.status = "timed_out";
+        job.finishedAt = this.now();
+        publish(true);
+      });
     }, timeoutMs);
     spawned.onExit((code, _signal, error) => {
       if (error) push(error.message);
       if (job.timer) clearTimeout(job.timer);
-      if (job.status === "running") job.status = "exited";
+      if (job.status === "running") job.status = job.timedOut ? "timed_out" : "exited";
       job.exitCode = code;
       job.finishedAt = job.finishedAt ?? this.now();
-      job.output = redact(job.raw);
+      publish(true);
     });
     this.jobs.set(job.jobId, job);
     return this.view(job);
@@ -135,7 +166,7 @@ export class JobTable {
       exitCode: job.exitCode,
       startedAt: job.startedAt,
       ...(job.finishedAt != null ? { finishedAt: job.finishedAt } : {}),
-      argv: job.argv,
+      argv: job.argv.map((arg) => redact(arg)),
       cwd: job.cwd,
       output: job.output.slice(0, end),
       nextOffset: end,

@@ -15,6 +15,14 @@ export interface Env {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional pre-registered OAuth clients. JSON array of { clientId, clientSecret, redirectUris }. */
   OAUTH_CLIENTS?: string;
-  /** Override the public origin when the request host is not the URL clients use. */
+  /**
+   * Public origin clients use, when the request host is not that URL.
+   * Set this on Cloudflare when the worker hostname is not the URL Gemini registered.
+   */
   PUBLIC_ORIGIN?: string;
+  /**
+   * Optional exact redirect URIs, comma-separated. Leave unset until the first
+   * Gemini dynamic registration, then pin the `/r/...` or `/a/...` URI it used.
+   */
+  OAUTH_PINNED_REDIRECTS?: string;
 }
