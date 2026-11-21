@@ -26,7 +26,7 @@ Nothing in this repository is deployed for you, and no real token belongs in git
 
 `@cloudflare/workers-oauth-provider` owns the worker entrypoint and treats its API route as OAuth-only. That would reject Antigravity's static bearer and wrap `/mcp` and `/agent`. The worker therefore implements the OAuth 2.1 surface itself: RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. A refresh token is stable: every refresh returns that same token. It expires 90 days after it was created, and a refresh does not move that deadline. Access tokens last one hour and are bound to `https://<origin>/gemini/mcp`. Clients can revoke tokens at `/oauth/revoke`. Dynamic registration is capped (50 clients unless the process is restarted with a fresh store).
 
-Without pins, Gemini can register HTTPS callbacks on `oauth-redirect.googleusercontent.com` under `/r/` or `/a/`. Configure `OAUTH_PINNED_REDIRECTS` to require exact callbacks, including for loopback development clients. Set `PUBLIC_ORIGIN` to the origin clients use when the worker's request host is not that URL (a custom domain, or a proxy in front of `*.workers.dev`).
+Without pins, Gemini can register the six official Connected Apps callbacks: `https` on `oauth-redirect.googleusercontent.com`, `oauth-redirect-sandbox.googleusercontent.com`, and `oauth-redirect-test.googleusercontent.com`, each under `/r/` or `/a/`, with no port. Other paths, ports, schemes, and hosts are rejected, including loopback. Configure `OAUTH_PINNED_REDIRECTS` to require exact callbacks, including for loopback development clients. Set `PUBLIC_ORIGIN` to the origin clients use when the worker's request host is not that URL (a custom domain, or a proxy in front of `*.workers.dev`).
 
 Google sign-in does not issue a code immediately. After the Google account is accepted, the browser shows a consent page with the client name, client id, and the exact redirect URI. The form carries a one-time CSRF token. `OWNER_APPROVAL_SECRET` is ignored while Google sign-in is configured, and it never mints a token whose subject skips `OWNER_EMAILS`.
 
@@ -78,13 +78,16 @@ npx wrangler secret put OAUTH_PINNED_REDIRECTS
 # https://oauth-redirect.googleusercontent.com/r/your-app
 ```
 
-Or skip Google and use a single approval secret of at least 16 characters. Gemini still redirects a browser at `/oauth/authorize`. The page asks for this secret and does not set a cookie.
+Or skip Google and use approval-secret mode. Approval-secret mode needs both `OWNER_EMAILS` and an `OWNER_APPROVAL_SECRET` of at least 16 characters. `OWNER_EMAILS` is the address written onto the token. The approval secret is the password the consent page asks for. If either value is missing, or the secret is shorter than 16 characters, `/oauth/authorize` returns 503 before the form is shown. An empty `OWNER_EMAILS` still fails inside `approve()` with "Set OWNER_EMAILS to use the approval secret" if a request reaches that step. Gemini still redirects a browser at `/oauth/authorize`. The page asks for the secret and does not set a cookie.
 
 ```bash
+npx wrangler secret put OWNER_EMAILS
+# you@gmail.com
 npx wrangler secret put OWNER_APPROVAL_SECRET
+# at least 16 characters
 ```
 
-If both are set, Google sign-in is what Gemini's browser hits. Leave `OWNER_APPROVAL_SECRET` unset when you use Google.
+If Google credentials and the approval secret are both set, Google sign-in is what Gemini's browser hits. Leave `OWNER_APPROVAL_SECRET` unset when you use Google. `OWNER_EMAILS` is still required.
 
 Optional pre-registered client, if you would rather type a client id and secret into Gemini than use dynamic registration:
 
@@ -115,7 +118,7 @@ The authorization metadata must include `authorization_endpoint`, `token_endpoin
 
 ## Install the agent
 
-Use the existing installers. They already register the logon task (Windows), the systemd user service (Linux), or the LaunchAgent (macOS). They also copy `policy.example.json` next to `agent.env` when `policy.json` is absent.
+Use the existing installers. They already register the logon task (Windows), the systemd user service (Linux), or the LaunchAgent (macOS). The Windows installer always copies `policy.example.json` from the repo it just updated into `%USERPROFILE%\.config\grokcode\`, including on a reinstall that reuses `~\.grokcode\repo` (that path is fast-forwarded to latest `main` first). The Linux and macOS installers copy the example when `policy.json` is absent.
 
 Windows (`my-pc`) uses PowerShell 7 (`pwsh`) for the opt-in shell mode. The agent process itself is Node. Install PowerShell 7 so `pwsh` is on `PATH` if you later set `allowShell`. The scheduled task must stay a logon task for your user, not an Administrator or SYSTEM task. Run the installer from Windows PowerShell 5.1 as documented in the README; that host is only the installer.
 

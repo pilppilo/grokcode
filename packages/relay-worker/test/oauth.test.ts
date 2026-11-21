@@ -572,12 +572,145 @@ test("loopback registration and existing loopback clients require configured red
   assert.equal((await response.json() as { error_description: string }).error_description, "redirect_uri is not registered.");
 });
 
-test("unpinned Gemini clients can register only on the production redirect origin", async () => {
+const GEMINI_CALLBACKS = [
+  "oauth-redirect.googleusercontent.com",
+  "oauth-redirect-sandbox.googleusercontent.com",
+  "oauth-redirect-test.googleusercontent.com",
+].flatMap((host) => ["r", "a"].map((prefix) => `https://${host}/${prefix}/user_bound_custom-mcp-test`));
+
+test("unpinned Gemini clients can register the six official Connected Apps callbacks", async () => {
   const { config } = setup({ pinnedRedirects: [] });
-  await register(config, "https://oauth-redirect.googleusercontent.com/r/test-app");
+  for (const uri of GEMINI_CALLBACKS) {
+    assert.equal(redirectUriAllowed(uri, []), true);
+    await register(config, uri);
+  }
   for (const uri of [
-    "https://oauth-redirect.googleusercontent.com/other/test-app",
-    "https://oauth-redirect.googleusercontent.com:444/r/test-app",
-    "https://oauth-redirect-sandbox.googleusercontent.com/r/test-app",
-  ]) assert.equal(redirectUriAllowed(uri, []), false);
+    "https://oauth-redirect.googleusercontent.com/other/user_bound_custom-mcp-test",
+    "https://oauth-redirect.googleusercontent.com:444/r/user_bound_custom-mcp-test",
+    "http://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-test",
+    "https://evil.googleusercontent.com/r/user_bound_custom-mcp-test",
+    "https://localhost/r/user_bound_custom-mcp-test",
+  ]) {
+    assert.equal(redirectUriAllowed(uri, []), false);
+    const rejected = await handleOAuthRequest(
+      new Request("https://relay.example/oauth/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [uri], token_endpoint_auth_method: "none" }),
+      }),
+      config,
+    );
+    assert.equal(rejected.status, 400);
+  }
+});
+
+test("one dynamic registration accepts Gemini's six callbacks and echoes them", async () => {
+  const { config } = setup({ pinnedRedirects: [] });
+  const response = await handleOAuthRequest(
+    new Request("https://relay.example/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: GEMINI_CALLBACKS,
+        client_name: "Gemini",
+        token_endpoint_auth_method: "client_secret_post",
+      }),
+    }),
+    config,
+  );
+  assert.equal(response.status, 201);
+  const body = (await response.json()) as { redirect_uris: string[]; token_endpoint_auth_method: string };
+  assert.deepEqual(body.redirect_uris, GEMINI_CALLBACKS);
+  assert.equal(body.token_endpoint_auth_method, "client_secret_post");
+});
+
+test("authorize accepts a long Gemini state and finish returns it unchanged", async () => {
+  const { config } = setup();
+  const client = await register(config);
+  const state = `gemini.${"A".repeat(1182)}.state-tail`;
+  assert.equal(state.length, 1200);
+  const page = await handleOAuthRequest(
+    new Request(
+      `https://relay.example/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&state=${encodeURIComponent(state)}&code_challenge=${CHALLENGE}&code_challenge_method=S256`,
+    ),
+    config,
+  );
+  assert.equal(page.status, 200);
+  const txn = /name="txn" value="([^"]+)"/.exec(await page.text())?.[1];
+  const approved = await handleOAuthRequest(
+    new Request("https://relay.example/oauth/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ txn: txn!, secret: SECRET }),
+    }),
+    config,
+  );
+  assert.equal(approved.status, 302);
+  assert.equal(new URL(approved.headers.get("location") ?? "").searchParams.get("state"), state);
+
+  const tooLong = await handleOAuthRequest(
+    new Request(
+      `https://relay.example/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&state=${encodeURIComponent("s".repeat(8193))}&code_challenge=${CHALLENGE}&code_challenge_method=S256`,
+    ),
+    config,
+  );
+  assert.equal(tooLong.status, 400);
+  assert.equal((await tooLong.json() as { error_description: string }).error_description, "state is invalid.");
+
+  const broken = await handleOAuthRequest(
+    new Request(
+      `https://relay.example/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&state=${encodeURIComponent("line\nbreak")}&code_challenge=${CHALLENGE}&code_challenge_method=S256`,
+    ),
+    config,
+  );
+  assert.equal(broken.status, 400);
+  assert.equal((await broken.json() as { error_description: string }).error_description, "state is invalid.");
+
+  const missing = await handleOAuthRequest(
+    new Request(
+      `https://relay.example/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&code_challenge=${CHALLENGE}&code_challenge_method=S256`,
+    ),
+    config,
+  );
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json() as { error_description: string }).error_description, "state is required.");
+});
+
+test("approval-secret mode requires OWNER_EMAILS before the secret form", async () => {
+  const { config, store } = setup({ ownerEmails: [] });
+  const client = await register(config);
+  const page = await handleOAuthRequest(
+    new Request(
+      `https://relay.example/oauth/authorize?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&state=xyz&code_challenge=${CHALLENGE}&code_challenge_method=S256`,
+    ),
+    config,
+  );
+  assert.equal(page.status, 503);
+  const body = await page.text();
+  assert.match(body, /OWNER_EMAILS/);
+  assert.match(body, /OWNER_APPROVAL_SECRET/);
+  assert.match(body, /at least 16 characters/);
+
+  await store.put(
+    "txn:saved",
+    JSON.stringify({
+      clientId: client.client_id,
+      redirectUri: REDIRECT,
+      codeChallenge: CHALLENGE,
+      clientState: "xyz",
+      scope: "shell",
+      expiresAt: 2_000_000_000_000,
+    }),
+    2_000_000_000_000,
+  );
+  const approved = await handleOAuthRequest(
+    new Request("https://relay.example/oauth/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ txn: "saved", secret: SECRET }),
+    }),
+    config,
+  );
+  assert.equal(approved.status, 503);
+  assert.match(await approved.text(), /Set OWNER_EMAILS to use the approval secret/);
 });
