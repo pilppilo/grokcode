@@ -1,9 +1,10 @@
 import { ToolError, type PathPlatform } from "grokcode-shared";
 
 import { isSensitivePath, pathApi } from "./confine.js";
-import { branchAllowed, type Policy } from "./policy.js";
+import { branchAllowed, evaluateCommand, type Policy } from "./policy.js";
+import { confineCwd, type FileContext } from "./files.js";
 import { redact } from "./redact.js";
-import { runAndWait, type SpawnFn } from "./spawn.js";
+import { childEnv, runAndWait, type SpawnFn } from "./spawn.js";
 
 export async function gitStatus(
   cwd: string,
@@ -20,6 +21,35 @@ export async function gitStatus(
   if (result.timedOut) throw new ToolError("git status timed out.", "timeout");
   if (result.code !== 0) throw new ToolError(redact(result.output).trim() || "git status failed.", "git_failed");
   return { cwd, output: redact(result.output) };
+}
+
+export async function gitInspect(
+  cwd: string, command: "diff" | "log", limit: number, ctx: FileContext, spawnImpl?: SpawnFn,
+): Promise<{ cwd: string; output: string; truncated: boolean }> {
+  const args = command === "diff"
+    ? ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--cached"]
+    : ["log", "--no-show-signature", "--no-notes", "--oneline", `--max-count=${limit}`];
+  const decision = evaluateCommand(ctx.policy, ["git", ...args], { platform: ctx.platform, cwd, home: ctx.home });
+  if (!decision.allow) throw new ToolError(decision.reason, "policy_denied");
+  const cap = Math.min(32_768, ctx.policy.limits.maxOutputBytes);
+  const timeout = Math.min(8_000, ctx.policy.limits.timeoutMs);
+  const env = { ...childEnv(process.env, ctx.platform), GIT_NO_LAZY_FETCH: "1" };
+  const common = { cwd, platform: ctx.platform, shell: false, env };
+  const git = ["git", "--no-pager", "-c", "core.fsmonitor=false"];
+  const location = await runAndWait({
+    ...common, argv: [...git, "rev-parse", "--absolute-git-dir"],
+  }, timeout, 4096, spawnImpl);
+  if (location.code !== 0 || location.truncated) {
+    throw new ToolError(redact(location.output).trim() || "Cannot locate the Git directory.", "git_failed");
+  }
+  confineCwd(location.stdout.trimEnd(), ctx);
+  const result = await runAndWait({ ...common, argv: [...git, ...args] }, timeout, cap, spawnImpl);
+  if (result.timedOut) throw new ToolError(`git ${command} timed out.`, "timeout");
+  if (result.code !== 0 && !result.truncated) {
+    throw new ToolError(redact(result.output).trim() || `git ${command} failed.`, "git_failed");
+  }
+  const output = redact(result.output);
+  return { cwd, output: Buffer.from(output).subarray(0, cap).toString("utf8"), truncated: result.truncated || Buffer.byteLength(output) > cap };
 }
 
 export async function gitCommit(
