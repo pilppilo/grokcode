@@ -65,7 +65,7 @@ export function readFile(input: string, ctx: FileContext, offset = 0, maxBytes?:
       const width = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
       if (lead > 0 && read - lead < width) read = lead;
     }
-    const sourceCode = /\.[cm]?[jt]sx?$/i.test(file);
+    const sourceCode = /\.(?:[cm]?[jt]sx?|py|go|rs|sh|bash|zsh|fish|ps1|rb|php|java|kt|swift|c|h|cpp|cs|lua)$/i.test(file);
     const content = redact(buffer.subarray(0, read).toString("utf8"), sourceCode);
     return { path: file, content, bytes: read, nextOffset: start + read, truncated: start + read < end };
   } finally {

@@ -18,7 +18,7 @@ const ASSIGNMENT: [RegExp, string] = [
 ];
 
 const QUOTED_ASSIGNMENT =
-  /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|pwd)\b(["']?[ \t]*[=:][ \t]*)(['"])[^\r\n]*?(?=\3)/gi;
+  /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|pwd)\b(["']?[ \t]*[=:][ \t]*)(['"])(?:(?!\3)[^\r\n]){8,}(?=\3)/gi;
 
 /** Replace obvious credentials before output is returned or written to the audit log. */
 export function redact(text: string, sourceCode = false): string {
