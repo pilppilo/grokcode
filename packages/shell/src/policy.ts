@@ -354,7 +354,7 @@ function hardDeny(argv: readonly string[], platform: PathPlatform): string | nul
   return null;
 }
 
-function pathLikeArgument(arg: string, platform: PathPlatform): string | null {
+function pathLikeArgument(arg: string): string | null {
   let value = arg;
   if (value.startsWith("-")) {
     const eq = value.indexOf("=");
@@ -362,11 +362,7 @@ function pathLikeArgument(arg: string, platform: PathPlatform): string | null {
     value = value.slice(eq + 1);
     if (!value) return null;
   }
-  if (platform === "posix" && value.includes(":") && !value.startsWith("/")) return null;
-  if (value.startsWith("~") || value.startsWith("/") || value.startsWith("\\") || /^[a-zA-Z]:[\\/]/.test(value) || value.includes("..")) {
-    return value;
-  }
-  return null;
+  return value || null;
 }
 
 export function evaluateCommand(
@@ -403,7 +399,7 @@ export function evaluateCommand(
     }
   }
   for (const arg of argv.slice(1)) {
-    const liked = pathLikeArgument(arg, options.platform);
+    const liked = pathLikeArgument(arg);
     if (!liked) continue;
     let resolved: string;
     try {

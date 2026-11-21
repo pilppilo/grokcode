@@ -69,7 +69,8 @@ export class JobTable {
       job.finishedAt = this.now();
       job.kill();
     }, timeoutMs);
-    spawned.onExit((code) => {
+    spawned.onExit((code, _signal, error) => {
+      if (error) push(error.message);
       if (job.timer) clearTimeout(job.timer);
       if (job.status === "running") job.status = "exited";
       job.exitCode = code;

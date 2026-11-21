@@ -220,7 +220,7 @@ test("metadata, dynamic registration, approval, and token checks", async () => {
   const revoked = await handleOAuthRequest(
     new Request("https://relay.example/oauth/revoke", {
       method: "POST",
-      body: new URLSearchParams({ token: tokens.refresh_token, client_id: client.client_id }),
+      body: new URLSearchParams({ token: next.access_token, client_id: client.client_id }),
     }),
     config,
   );

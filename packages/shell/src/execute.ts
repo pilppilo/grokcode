@@ -9,6 +9,7 @@ import {
   listDir,
   readFile,
   readTextIfExists,
+  validatePatchFile,
   removeFile,
   writeFile,
   type FileContext,
@@ -189,30 +190,45 @@ function applyPatch(record: Record<string, unknown>, ctx: FileContext) {
   const cwd = confineCwd(requiredString(record.cwd, "cwd", 4096), ctx);
   const files = parseUnifiedDiff(requiredString(record.patch, "patch", 1_000_000));
   const changed: Array<{ path: string; action: "created" | "updated" | "deleted" }> = [];
+  const writes: Array<() => void> = [];
+  const targets = new Set<string>();
+  const reserve = (target: string) => {
+    const key = ctx.platform === "win32" ? target.toLowerCase() : target;
+    if (targets.has(key)) throw new ToolError("patch touches the same path more than once.", "invalid_patch");
+    targets.add(key);
+  };
   for (const file of files) {
-    if (file.newPath == null) {
-      const target = locate(file.oldPath, ctx, cwd, false);
-      removeFile(target, ctx);
-      changed.push({ path: target, action: "deleted" });
+    const source = file.oldPath == null ? null : locate(file.oldPath, ctx, cwd, false);
+    if (file.newPath == null && source) {
+      reserve(source);
+      applyHunks(readTextIfExists(source, ctx.policy.limits.maxReadBytes), file.hunks);
+      writes.push(() => removeFile(source, ctx));
+      changed.push({ path: source, action: "deleted" });
       continue;
     }
     const target = locate(file.newPath, ctx, cwd, true);
-    const original =
-      file.oldPath == null ? "" : readTextIfExists(locate(file.oldPath, ctx, cwd, false), ctx.policy.limits.maxReadBytes);
+    reserve(target);
+    const original = source == null ? "" : readTextIfExists(source, ctx.policy.limits.maxReadBytes);
     const next = applyHunks(original, file.hunks);
     if (Buffer.byteLength(next) > ctx.policy.limits.maxWriteBytes) {
       throw new ToolError("patched file exceeds the write cap.", "too_large");
     }
-    writeFile(target, next, ctx);
-    if (file.oldPath && file.oldPath !== file.newPath) removeFile(locate(file.oldPath, ctx, cwd, false), ctx);
-    changed.push({ path: target, action: file.oldPath == null ? "created" : "updated" });
+    writes.push(() => writeFile(target, next, ctx));
+    if (source && source !== target) {
+      reserve(source);
+      writes.push(() => removeFile(source, ctx));
+    }
+    changed.push({ path: target, action: source == null ? "created" : "updated" });
   }
+  for (const write of writes) write();
   return { cwd, files: changed };
 }
 
 function locate(input: string | null, ctx: FileContext, cwd: string, allowMissing: boolean): string {
   if (!input) throw new ToolError("patch file path is missing.", "invalid_patch");
-  return confineFile(input, ctx, cwd, allowMissing, !allowMissing);
+  const target = confineFile(input, ctx, cwd, allowMissing, !allowMissing);
+  validatePatchFile(target, allowMissing);
+  return target;
 }
 
 function contentsArg(value: unknown, maxBytes: number): string {
