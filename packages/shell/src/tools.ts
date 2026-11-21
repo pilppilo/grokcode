@@ -7,7 +7,7 @@ export const SHELL_INSTRUCTIONS = [
   "grokcode-shell runs commands and edits files on the owner's own PCs.",
   "Call list_machines first. Pass machine on every later tool when more than one PC is online.",
   "get_machine_info reports the OS, the shell (pwsh on Windows, bash on Linux), and the allowed roots.",
-  "run_command takes argv (the program plus arguments) and an absolute cwd inside those roots. It does not invoke a shell unless shell is true and that machine's policy allows it.",
+  "run_command takes argv (the program plus arguments) and an absolute cwd inside those roots. It does not invoke a shell unless shell is true and that machine's policy sets allowShell, which means an arbitrary shell.",
   "Commands are deny-by-default. A command must match the per-machine allowlist, and a hard deny list blocks privilege escalation, recursive deletes of a drive root, and argument-based code execution such as git -c.",
   "wait defaults to true and blocks for up to about 20 seconds. Poll get_job or poll_output for running jobs, or use kill_job to cancel.",
   "read_file, list_dir, write_file, and apply_patch stay inside the allowed roots and refuse symlink escapes.",
@@ -67,7 +67,7 @@ const tools: ShellTool[] = [
         cwd: { type: "string", description: "Absolute working directory inside the allowed roots." },
         shell: {
           type: "boolean",
-          description: "Opt in to pwsh (Windows) or bash (Linux). Default false. Denied unless policy allowShell is true.",
+          description: "Run the command string in an arbitrary shell (pwsh on Windows, bash on Linux). Default false. Denied unless policy allowShell is true.",
         },
         command: { type: "string", description: "Shell command string. Used only when shell is true." },
         timeoutMs: { type: "integer", minimum: 100, maximum: 120000, description: "Kill the process after this many milliseconds." },
@@ -181,7 +181,7 @@ const tools: ShellTool[] = [
   },
   {
     name: "git_status",
-    description: "Run git status --porcelain inside a repository under the allowed roots. The arguments are fixed. Read-only.",
+    description: "Run git status --porcelain inside a repository under the allowed roots. Requires git status on the allowlist. The arguments are fixed. Read-only.",
     op: "shell_git_status",
     annotations: readOnly,
     inputSchema: {

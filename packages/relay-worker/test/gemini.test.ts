@@ -25,6 +25,7 @@ function bridge(): HubBridge & { calls: unknown[] } {
 function oauth(): OAuthConfig {
   return {
     store: new MemoryOAuthStore(),
+    pinnedRedirects: ["http://127.0.0.1/callback"],
     ownerEmails: ["ada@example.com"],
     approvalSecret: SECRET,
     publicOrigin: "https://relay.example",

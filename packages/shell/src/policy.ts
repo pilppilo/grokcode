@@ -6,6 +6,7 @@ import {
   commandBase,
   expandLexical,
   expandRoot,
+  isBareCommandName,
   isFsRoot,
   isSensitivePath,
   pathApi,
@@ -213,7 +214,11 @@ function parseAllow(value: unknown): AllowRule[] {
     if (!isRecord(entry) || typeof entry.command !== "string" || entry.command.trim() === "") {
       throw new ToolError("each allow rule needs a command string.", "invalid_policy");
     }
-    const rule: AllowRule = { command: entry.command.trim() };
+    const command = entry.command.trim();
+    if (!isBareCommandName(command) || /\.(?:cmd|bat|com)$/i.test(command)) {
+      throw new ToolError(`allow rule command must be a bare name, not a path (${command}).`, "invalid_policy");
+    }
+    const rule: AllowRule = { command };
     if (entry.subcommands != null) {
       if (!Array.isArray(entry.subcommands) || entry.subcommands.some((item) => typeof item !== "string")) {
         throw new ToolError(`allow rule ${entry.command} has an invalid subcommands list.`, "invalid_policy");
@@ -291,12 +296,116 @@ function pathIsRoot(value: string): boolean {
   return /^[a-zA-Z]:$/.test(normalized) || /^[a-zA-Z]:\/\*$/.test(normalized);
 }
 
+function isInterpreterCommand(base: string): boolean {
+  if (INTERPRETERS.has(base)) return true;
+  return /^(?:python|pypy|node|nodejs|ruby|perl|php|lua|pwsh)\d+(?:\.\d+)*$/.test(base);
+}
+
+const RG_FLAGS = new Set([
+  "-F",
+  "--fixed-strings",
+  "-n",
+  "--line-number",
+  "-i",
+  "--ignore-case",
+  "-w",
+  "--word-regexp",
+  "-l",
+  "--files-with-matches",
+  "-H",
+  "--with-filename",
+  "--heading",
+  "--no-heading",
+  "--color=never",
+  "--color=none",
+  "-e",
+  "--regexp",
+]);
+
+function rgFlagsDenied(argv: readonly string[]): string | null {
+  let skip = false;
+  let afterSeparator = false;
+  for (const arg of argv.slice(1)) {
+    if (skip) {
+      skip = false;
+      continue;
+    }
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    if (afterSeparator || !arg.startsWith("-")) continue;
+    if (arg === "-e" || arg === "--regexp") {
+      skip = true;
+      continue;
+    }
+    if (/^(?:-e|--regexp=)/.test(arg) || /^-(?:[ABCm])\d+$/.test(arg)) continue;
+    const key = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (key === "-m" || key === "-A" || key === "-B" || key === "-C" || key === "--max-count" || key === "--context" || key === "--after-context" || key === "--before-context" || key === "--max-columns") {
+      if (!arg.includes("=")) skip = true;
+      continue;
+    }
+    if (!RG_FLAGS.has(arg)) return "rg flags are restricted to a fixed safe set";
+  }
+  return null;
+}
+
+function sedExecutes(arg: string): boolean {
+  if (arg === "e" || /^e\s/.test(arg)) return true;
+  return /(?:^|[\n;])\s*s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[^;\n]*e/.test(arg);
+}
+
+const NPM_LIFECYCLE = new Set([
+  "install",
+  "i",
+  "ci",
+  "update",
+  "up",
+  "rebuild",
+  "run",
+  "run-script",
+  "exec",
+  "dlx",
+  "explore",
+  "create",
+  "start",
+  "test",
+  "publish",
+  "prepare",
+  "preinstall",
+  "postinstall",
+]);
+
+function gitSpecPath(arg: string): string | null {
+  if (!arg || arg.startsWith("-") || arg.includes("://")) return null;
+  const colon = arg.indexOf(":");
+  if (colon <= 0) return null;
+  if (colon === 1 && /[a-z]/i.test(arg[0] ?? "")) return null;
+  const rest = arg.slice(colon + 1);
+  if (!rest || rest.startsWith(":")) return null;
+  return rest.replace(/^\/+/, "");
+}
+
+function gitPushDenied(argv: readonly string[], policy: Policy): string | null {
+  if (!policy.git.push) return "git push is disabled in the machine policy";
+  const start = argv.indexOf("push");
+  const rest = argv.slice(start + 1).filter((arg) => arg !== "--");
+  if (rest.some((arg) => arg.startsWith("-") || arg.startsWith("+"))) return "git push flags and force refspecs are denied";
+  if (rest.length !== 2 || rest[0] !== "origin") return "git push only allows origin and HEAD:<allowlisted branch>";
+  const match = /^HEAD:([A-Za-z0-9._/-]+)$/.exec(rest[1] ?? "");
+  if (!match || !branchAllowed(match[1] ?? "", policy.git.branches)) return "git push refspec is not an allowlisted branch";
+  return null;
+}
+
 function hardDeny(argv: readonly string[], platform: PathPlatform): string | null {
   if (argv.length === 0 || argv.length > 64) return "argv must contain 1 to 64 arguments";
   for (const arg of argv) {
     if (typeof arg !== "string" || arg.length > 4096 || arg.includes("\0")) return "an argument is empty, too long, or contains NUL";
   }
-  const base = commandBase(argv[0] ?? "", platform);
+  const name = argv[0] ?? "";
+  if (!isBareCommandName(name)) return "command must be a bare name with no path";
+  if (/\.(?:cmd|bat|com)$/i.test(name)) return "Windows script shims (.cmd, .bat, .com) are denied";
+  const base = commandBase(name, platform);
   if (!base) return "command is empty";
   if (ALWAYS_DENY.has(base) || base.startsWith("mkfs")) return `${base} is denied`;
   if (base === "rm" || base === "del" || base === "rmdir" || base === "rd" || base === "erase" || base === "remove-item" || base === "ri") {
@@ -328,28 +437,51 @@ function hardDeny(argv: readonly string[], platform: PathPlatform): string | nul
       if (lower.startsWith("--git-dir=") || lower.startsWith("--work-tree=")) return "git directory overrides are denied";
       if (arg === "--no-verify") return "git --no-verify is denied";
     }
-    if (sub === "push" && argv.some((arg) => arg === "--force" || arg === "-f" || arg === "--force-with-lease" || arg.startsWith("--force-with-lease="))) {
+    if (argv.some((arg) => /(?:^|[\s=])[A-Za-z][A-Za-z0-9+.-]*::/.test(arg))) {
+      return "git remote-helper URLs are denied";
+    }
+    if (sub === "push" && argv.some((arg) => arg.startsWith("+") || arg === "--force" || arg === "-f" || arg === "--force-with-lease" || arg.startsWith("--force-with-lease="))) {
       return "git force-push is denied";
+    }
+  }
+  if (base === "ssh" || base === "scp" || base === "sftp") {
+    for (let i = 1; i < argv.length; i++) {
+      const arg = argv[i] ?? "";
+      const lower = arg.toLowerCase().replace(/\s+/g, "");
+      if (lower.includes("proxycommand") || lower.includes("localcommand") || lower.includes("permitlocalcommand") || lower.includes("proxyjump")) {
+        return "ssh command execution options are denied";
+      }
+      if (arg === "-o" || arg === "-O") {
+        const next = (argv[i + 1] ?? "").toLowerCase().replace(/\s+/g, "");
+        if (next.startsWith("proxycommand") || next.startsWith("localcommand") || next.startsWith("permitlocalcommand") || next.startsWith("proxyjump")) {
+          return "ssh command execution options are denied";
+        }
+      }
     }
   }
   if (base === "find" && argv.some((arg) => arg === "-exec" || arg === "-execdir" || arg === "-ok" || arg === "-okdir")) {
     return "find -exec is denied";
   }
-  if (base === "tar" && argv.some((arg) => arg.startsWith("--checkpoint-action") || arg === "--to-command" || arg.startsWith("--to-command="))) {
+  if (base === "tar" && argv.some((arg) => arg.startsWith("--checkpoint-action") || arg === "--to-command" || arg.startsWith("--to-command=") || arg === "-I" || arg === "--use-compress-program" || arg.startsWith("--use-compress-program="))) {
     return "tar actions that execute a program are denied";
   }
   if (base === "rsync" && argv.some((arg) => arg === "-e" || arg === "--rsh" || arg.startsWith("--rsh="))) {
     return "rsync remote-shell arguments are denied";
   }
-  if (base === "rg" && argv.some((arg) => arg === "--pre" || arg.startsWith("--pre=") || arg === "--pre-glob")) {
-    return "rg --pre executes a program and is denied";
+  if (base === "rg") {
+    const flags = rgFlagsDenied(argv);
+    if (flags) return flags;
   }
   if (base === "sed") {
-    const dangerous = argv.slice(1).some((arg) => arg === "-e" || arg === "--expression" || /^-[a-zA-Z]*e[a-zA-Z]*$/.test(arg));
-    if (dangerous) return "sed -e can execute the shell and is denied";
+    const dangerous = argv.slice(1).some((arg) => arg === "-e" || arg === "--expression" || /^-[a-zA-Z]*e[a-zA-Z]*$/.test(arg) || sedExecutes(arg));
+    if (dangerous) return "sed expressions that can execute the shell are denied";
   }
   if (base === "awk" || base === "gawk" || base === "nawk") {
-    if (argv.some((arg) => /\bsystem\s*\(/.test(arg))) return "awk system() is denied";
+    if (argv.some((arg) => /\bsystem\s*\(/.test(arg) || /\|/.test(arg))) return "awk command pipes are denied";
+  }
+  if (base === "npx" || base === "pnpx") return "npx runs package code and is denied";
+  if ((base === "npm" || base === "pnpm" || base === "yarn" || base === "corepack") && argv.slice(1).some((arg) => NPM_LIFECYCLE.has(arg.toLowerCase()))) {
+    return `${base} lifecycle scripts are denied`;
   }
   if (base === "env" || base === "xargs" || base === "nice" || base === "nohup") {
     return `${base} can wrap another program and is denied`;
@@ -379,7 +511,7 @@ export function evaluateCommand(
   const command = argv.length > 0 ? commandBase(argv[0] ?? "", options.platform) : "";
   const denied = hardDeny(argv, options.platform);
   if (denied) return { allow: false, reason: denied, command };
-  if (INTERPRETERS.has(command) && !policy.allowInterpreters) {
+  if (isInterpreterCommand(command) && !policy.allowInterpreters) {
     return {
       allow: false,
       reason: `${command} is a shell or interpreter. It stays denied unless allowInterpreters is true.`,
@@ -403,6 +535,11 @@ export function evaluateCommand(
         return { allow: false, reason: `${command} argument matched a deny pattern`, command };
       }
     }
+  }
+  if (command === "git" && firstSubcommand(argv) === "push") {
+    const reason = gitPushDenied(argv, policy);
+    if (reason) return { allow: false, reason, command };
+    return { allow: true, reason: "allowlisted", command };
   }
   let afterSeparator = false;
   let rgPattern = false;
@@ -434,7 +571,21 @@ export function evaluateCommand(
       rgPattern = true;
       continue;
     }
-    if (!afterSeparator && gitSubcommand === "push" && /^\+?HEAD:[\w./-]+$/.test(arg)) continue;
+    if (command === "git" && gitSubcommand && gitSubcommand !== "push") {
+      const spec = gitSpecPath(arg);
+      if (spec) {
+        let resolvedSpec: string;
+        try {
+          resolvedSpec = expandLexical(spec, options.platform, options.home, options.cwd);
+        } catch (err) {
+          return { allow: false, reason: err instanceof Error ? err.message : "invalid path argument", command };
+        }
+        if (isFsRoot(resolvedSpec, options.platform) || !withinRoots(resolvedSpec, policy.roots, options.platform) || isSensitivePath(resolvedSpec, options.platform)) {
+          return { allow: false, reason: "an argument points at a denied path", command };
+        }
+        continue;
+      }
+    }
     const liked = pathLikeArgument(arg, options.cwd, options.platform, afterSeparator);
     if (!liked) continue;
     let resolved: string;
