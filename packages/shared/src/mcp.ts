@@ -42,6 +42,10 @@ export interface McpHandlerOptions {
    * a remote connector may send its own Origin, and bearer auth is the gate.
    */
   checkOrigin?: boolean;
+  /** Disable the generic preview cap when tools already bound their own output. */
+  preserveToolResults?: boolean;
+  /** Return 405 for GET when the endpoint has no server-initiated messages. */
+  disableSse?: boolean;
 }
 
 const DEFAULT_INSTRUCTIONS = [
@@ -85,9 +89,9 @@ function rpcError(id: unknown, code: number, message: string): unknown {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
 
-function toolResult(payload: unknown, isError = false): { content: { type: "text"; text: string }[]; isError: boolean } {
-  const text = truncate(typeof payload === "string" ? payload : JSON.stringify(payload, null, 2));
-  return { content: [{ type: "text", text }], isError };
+function toolResult(payload: unknown, isError = false, preserve = false): { content: { type: "text"; text: string }[]; isError: boolean } {
+  const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  return { content: [{ type: "text", text: preserve ? text : truncate(text) }], isError };
 }
 
 const TEXT_LIMIT = 80_000;
@@ -284,7 +288,7 @@ function handleRpc(message: JsonRpc, options: McpHandlerOptions): Promise<unknow
     const name = isRecord(params) && typeof params.name === "string" ? params.name : "";
     const args = isRecord(params) ? params.arguments ?? {} : {};
     return callTool(options, name, args).then(
-      (data) => rpcResult(id, toolResult(data, false)),
+      (data) => rpcResult(id, toolResult(data, false, options.preserveToolResults)),
       (err: unknown) =>
         rpcResult(
           id,
@@ -362,7 +366,12 @@ export async function handleMcpRequest(request: Request, options: McpHandlerOpti
       headers: corsHeaders(request),
     });
   }
-  if (request.method === "GET") return withCors(request, sseKeepalive());
+  if (request.method === "GET") {
+    const response = options.disableSse
+      ? json({ error: "method not allowed" }, 405, { allow: "POST, DELETE, OPTIONS" })
+      : sseKeepalive();
+    return withCors(request, response);
+  }
   if (request.method === "DELETE") return withCors(request, new Response(null, { status: 204 }));
   if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
 

@@ -24,7 +24,7 @@ Nothing in this repository is deployed for you, and no real token belongs in git
 | `/.well-known/oauth-protected-resource` and `.../gemini/mcp` | Gemini | Public |
 | `/agent` | Each PC | Per-machine token, unchanged |
 
-`@cloudflare/workers-oauth-provider` owns the worker entrypoint and treats its API route as OAuth-only. That would reject Antigravity's static bearer and wrap `/mcp` and `/agent`. The worker therefore implements the OAuth 2.1 surface itself: RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. Refresh tokens last 30 days and rotate on use. Access tokens last one hour.
+`@cloudflare/workers-oauth-provider` owns the worker entrypoint and treats its API route as OAuth-only. That would reject Antigravity's static bearer and wrap `/mcp` and `/agent`. The worker therefore implements the OAuth 2.1 surface itself: RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. Refresh tokens expire after 30 days without use. A successful refresh extends the expiry and returns the same token. Access tokens last one hour. Clients can revoke tokens at `/oauth/revoke`.
 
 Redirect URIs are limited to Google's Connected Apps hosts (`oauth-redirect.googleusercontent.com`, the sandbox host, and the test host) and to localhost.
 

@@ -122,6 +122,7 @@ interface RefreshRow {
 }
 
 interface AccessRow {
+  refreshHash?: string;
   clientId: string;
   email: string;
   scope: string;
@@ -252,6 +253,7 @@ export function isOAuthPath(pathname: string): boolean {
     path === "/oauth/register" ||
     path === "/oauth/authorize" ||
     path === "/oauth/token" ||
+    path === "/oauth/revoke" ||
     path === "/oauth/google/callback"
   );
 }
@@ -286,6 +288,16 @@ export async function handleOAuthRequest(request: Request, config: OAuthConfig):
   const runtime = runtimeFromRequest(request, config);
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (request.method === "OPTIONS" && isOAuthPath(path)) {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-headers": "Authorization, Content-Type",
+      },
+    });
+  }
   try {
     if (request.method === "GET" && path === "/.well-known/oauth-authorization-server") return metadata(runtime);
     if (
@@ -297,6 +309,7 @@ export async function handleOAuthRequest(request: Request, config: OAuthConfig):
     if (path === "/oauth/register") return register(request, runtime);
     if (path === "/oauth/authorize") return authorize(request, url, runtime);
     if (path === "/oauth/token") return token(request, runtime);
+    if (path === "/oauth/revoke") return revoke(request, runtime);
     if (path === "/oauth/google/callback") return googleCallback(url, runtime);
   } catch (err) {
     const message = err instanceof Error ? err.message : "oauth error";
@@ -321,6 +334,7 @@ export async function accessTokenSubject(
     return null;
   }
   if (row.expiresAt <= runtime.now()) return null;
+  if (row.refreshHash && await runtime.store.get(`revoked:${row.refreshHash}`)) return null;
   if (!emailAllowed(row.email, runtime.ownerEmails)) return null;
   return { email: row.email, clientId: row.clientId };
 }
@@ -330,6 +344,8 @@ function metadata(runtime: OAuthRuntime): Response {
     issuer: runtime.issuer,
     authorization_endpoint: `${runtime.issuer}/oauth/authorize`,
     token_endpoint: `${runtime.issuer}/oauth/token`,
+    revocation_endpoint: `${runtime.issuer}/oauth/revoke`,
+    revocation_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
     registration_endpoint: `${runtime.issuer}/oauth/register`,
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
@@ -384,7 +400,7 @@ async function register(request: Request, runtime: OAuthRuntime): Promise<Respon
   return oauthJson(
     {
       client_id: clientId,
-      ...(secret ? { client_secret: secret, client_secret_expires_at: 0 } : {}),
+      ...(secret ? { client_secret: secret, client_secret_expires_at: Math.floor(expiresAt / 1000) } : {}),
       client_id_issued_at: Math.floor(runtime.now() / 1000),
       redirect_uris: redirects,
       grant_types: grants,
@@ -414,7 +430,7 @@ async function authorize(request: Request, url: URL, runtime: OAuthRuntime): Pro
   if (state.length === 0 || state.length > 512 || /[\r\n]/.test(state)) {
     return oauthJson({ error: "invalid_request", error_description: "state is required." }, 400);
   }
-  const scope = params.get("scope") ?? "shell";
+  const scope = params.get("scope")?.trim() || "shell";
   if (scope.split(/\s+/).some((item) => item !== "shell" && item !== "offline_access")) {
     return oauthJson({ error: "invalid_scope" }, 400);
   }
@@ -523,6 +539,30 @@ async function token(request: Request, runtime: OAuthRuntime): Promise<Response>
   return oauthJson({ error: "unsupported_grant_type" }, 400);
 }
 
+async function revoke(request: Request, runtime: OAuthRuntime): Promise<Response> {
+  if (request.method !== "POST") return oauthJson({ error: "invalid_request" }, 405);
+  const form = await readForm(request);
+  const presented = await presentedClient(request, form);
+  const client = presented && await findClient(runtime, presented.clientId);
+  if (!presented || !client || client.expiresAt <= runtime.now() || !clientAuthenticated(client, presented.secret)) {
+    return oauthJson({ error: "invalid_client" }, 401);
+  }
+  const token = form.get("token");
+  if (!token) return oauthJson({ error: "invalid_request" }, 400);
+  const hash = sha256(token);
+  const refresh = await runtime.store.get(`refresh:${hash}`);
+  if (refresh && (JSON.parse(refresh) as RefreshRow).clientId === client.clientId) {
+    // Keep a marker so an in-flight refresh cannot restore a revoked grant.
+    await runtime.store.put(`revoked:${hash}`, "1", runtime.now() + REFRESH_TTL_MS + ACCESS_TTL_MS);
+  } else {
+    const access = await runtime.store.get(`access:${hash}`);
+    if (access && (JSON.parse(access) as AccessRow).clientId === client.clientId) {
+      await runtime.store.delete(`access:${hash}`);
+    }
+  }
+  return new Response(null, { headers: { "access-control-allow-origin": "*", "cache-control": "no-store" } });
+}
+
 async function exchangeCode(runtime: OAuthRuntime, client: StoredClient, form: URLSearchParams): Promise<Response> {
   const code = form.get("code") ?? "";
   const redirectUri = form.get("redirect_uri") ?? "";
@@ -538,19 +578,28 @@ async function exchangeCode(runtime: OAuthRuntime, client: StoredClient, form: U
 
 async function exchangeRefresh(runtime: OAuthRuntime, client: StoredClient, form: URLSearchParams): Promise<Response> {
   const refresh = form.get("refresh_token") ?? "";
-  const row = await takeJson<RefreshRow>(runtime, `refresh:${sha256(refresh)}`);
-  if (!row || row.clientId !== client.clientId) return oauthJson({ error: "invalid_grant" }, 400);
+  const hash = sha256(refresh);
+  if (await runtime.store.get(`revoked:${hash}`)) return oauthJson({ error: "invalid_grant" }, 400);
+  const raw = await runtime.store.get(`refresh:${hash}`);
+  const row = raw ? (JSON.parse(raw) as RefreshRow) : null;
+  if (!row || row.expiresAt <= runtime.now() || row.clientId !== client.clientId) return oauthJson({ error: "invalid_grant" }, 400);
   if (!emailAllowed(row.email, runtime.ownerEmails)) return oauthJson({ error: "access_denied" }, 403);
-  return issueTokens(runtime, client.clientId, row.email, row.scope);
+  return issueTokens(runtime, client.clientId, row.email, row.scope, refresh);
 }
 
-async function issueTokens(runtime: OAuthRuntime, clientId: string, email: string, scope: string): Promise<Response> {
+async function issueTokens(
+  runtime: OAuthRuntime,
+  clientId: string,
+  email: string,
+  scope: string,
+  refresh = randomUrlToken(32),
+): Promise<Response> {
   const access = randomUrlToken(32);
-  const refresh = randomUrlToken(32);
-  const accessRow: AccessRow = { clientId, email, scope, expiresAt: runtime.now() + ACCESS_TTL_MS };
+  const refreshHash = sha256(refresh);
+  const accessRow: AccessRow = { clientId, email, scope, refreshHash, expiresAt: runtime.now() + ACCESS_TTL_MS };
   const refreshRow: RefreshRow = { clientId, email, scope, expiresAt: runtime.now() + REFRESH_TTL_MS };
   await runtime.store.put(`access:${sha256(access)}`, JSON.stringify(accessRow), accessRow.expiresAt);
-  await runtime.store.put(`refresh:${sha256(refresh)}`, JSON.stringify(refreshRow), refreshRow.expiresAt);
+  await runtime.store.put(`refresh:${refreshHash}`, JSON.stringify(refreshRow), refreshRow.expiresAt);
   return oauthJson({
     access_token: access,
     token_type: "Bearer",
@@ -672,6 +721,7 @@ function oauthJson(body: unknown, status = 200): Response {
       "content-type": "application/json",
       "cache-control": "no-store",
       pragma: "no-cache",
+      "access-control-allow-origin": "*",
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     },
