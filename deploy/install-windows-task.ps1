@@ -38,7 +38,10 @@ function Resolve-NodeExe([string]$Preferred) {
 function Grant-CurrentUserOnly([string]$path) {
   if (-not (Test-Path $path)) { return }
   $item = Get-Item $path
-  $acl = $item.GetAccessControl()
+  # 'Access' reads and writes only the DACL. GetAccessControl() with no argument
+  # also loads the SACL, and Set-Acl then tries to write it. A non-admin user
+  # lacks SeSecurityPrivilege, so that fails and the logon task is never registered.
+  $acl = $item.GetAccessControl('Access')
   $acl.SetAccessRuleProtection($true, $false)
   foreach ($rule in @($acl.Access)) {
     [void]$acl.RemoveAccessRule($rule)
@@ -52,7 +55,7 @@ function Grant-CurrentUserOnly([string]$path) {
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")
   }
   $acl.AddAccessRule($rule)
-  Set-Acl -Path $path -AclObject $acl
+  $item.SetAccessControl($acl)
 }
 
 if (-not $ConfigDir) {

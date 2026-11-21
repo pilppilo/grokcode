@@ -165,7 +165,9 @@ export function pkceS256(verifier: string): string {
 export function redirectUriAllowed(uri: string, pinned?: readonly string[]): boolean {
   if (!validRedirectUri(uri)) return false;
   if (pinned?.length) return pinned.includes(uri);
-  return new URL(uri).origin === "https://oauth-redirect.googleusercontent.com";
+  const url = new URL(uri);
+  // Google documents all six Connected Apps callbacks (three hosts, /r/ and /a/) as official.
+  return url.protocol === "https:" && url.port === "" && GOOGLE_REDIRECT_HOSTS.has(url.hostname);
 }
 
 function validRedirectUri(uri: string): boolean {
@@ -474,8 +476,11 @@ async function authorize(request: Request, url: URL, runtime: OAuthRuntime): Pro
   const challenge = params.get("code_challenge") ?? "";
   if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) return oauthJson({ error: "invalid_request", error_description: "code_challenge is invalid." }, 400);
   const state = params.get("state") ?? "";
-  if (state.length === 0 || state.length > 512 || /[\r\n]/.test(state)) {
+  if (state.length === 0) {
     return oauthJson({ error: "invalid_request", error_description: "state is required." }, 400);
+  }
+  if (state.length > 8192 || /[\r\n]/.test(state)) {
+    return oauthJson({ error: "invalid_request", error_description: "state is invalid." }, 400);
   }
   const scope = params.get("scope")?.trim() || "shell";
   if (scope.split(/\s+/).some((item) => item !== "shell" && item !== "offline_access")) {
@@ -485,8 +490,11 @@ async function authorize(request: Request, url: URL, runtime: OAuthRuntime): Pro
   if (resource && resource !== runtime.resource && resource !== `${runtime.resource}/`) {
     return oauthJson({ error: "invalid_target", error_description: "resource does not match this server." }, 400);
   }
-  if (!runtime.identity && !runtime.approvalSecret) {
-    return html("Owner sign-in is not configured. Set OWNER_EMAILS plus Google credentials, or OWNER_APPROVAL_SECRET.", 503);
+  if (!runtime.identity && (!runtime.approvalSecret || runtime.ownerEmails.length === 0)) {
+    return html(
+      "Owner sign-in is not configured. Approval-secret mode needs OWNER_EMAILS and an OWNER_APPROVAL_SECRET of at least 16 characters. Google sign-in needs OWNER_EMAILS plus Google credentials.",
+      503,
+    );
   }
   const txnId = randomUrlToken(24);
   const txn: Txn = {
