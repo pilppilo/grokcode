@@ -116,3 +116,15 @@ test("cmd shim quoting handles spaces and rejects ambiguous input", () => {
 test("relative paths and the example file live next to the package", () => {
   assert.equal(path.basename(new URL("../policy.example.json", import.meta.url).pathname), "policy.example.json");
 });
+
+test("search patterns, commit messages and refspecs are distinct from paths", () => {
+  const parsed = policy({ allow: [{ command: "git" }, { command: "rg" }] }, "win32", "C:\\Users\\ada");
+  const options = { platform: "win32" as const, cwd: "C:\\Work", home: "C:\\Users\\ada" };
+  for (const argv of [
+    ["rg", "/api/v1"], ["rg", "http://example.test"], ["rg", "agent.env"],
+    ["git", "commit", "-m", "fix: foo"], ["git", "push", "origin", "HEAD:codex/bar"],
+    ["git", "log", "main..HEAD"],
+  ]) assert.equal(evaluateCommand(parsed, argv, options).allow, true, argv.join(" "));
+  assert.equal(evaluateCommand(parsed, ["rg", "-equery", ".env"], options).allow, false);
+  assert.equal(evaluateCommand(parsed, ["rg", "query", ".git/config"], options).allow, false);
+});

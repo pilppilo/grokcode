@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 import { ToolError, type PathPlatform } from "grokcode-shared";
 
 import {
@@ -6,6 +8,7 @@ import {
   expandRoot,
   isFsRoot,
   isSensitivePath,
+  pathApi,
   withinRoots,
 } from "./confine.js";
 
@@ -354,15 +357,18 @@ function hardDeny(argv: readonly string[], platform: PathPlatform): string | nul
   return null;
 }
 
-function pathLikeArgument(arg: string): string | null {
+function pathLikeArgument(arg: string, cwd: string, platform: PathPlatform, afterSeparator: boolean): string | null {
   let value = arg;
-  if (value.startsWith("-")) {
+  if (!afterSeparator && value.startsWith("-")) {
     const eq = value.indexOf("=");
     if (eq === -1) return null;
     value = value.slice(eq + 1);
     if (!value) return null;
   }
-  return value || null;
+  if (!value) return null;
+  if (/^[.~]|[\\/]/.test(value) || (platform === "win32" && /^[a-z]:/i.test(value))) return value;
+  const candidate = pathApi(platform).resolve(cwd, value);
+  return isSensitivePath(candidate, platform) || existsSync(candidate) ? value : null;
 }
 
 export function evaluateCommand(
@@ -398,8 +404,38 @@ export function evaluateCommand(
       }
     }
   }
+  let afterSeparator = false;
+  let rgPattern = false;
+  let skipValue = false;
+  const gitSubcommand = command === "git" ? firstSubcommand(argv) : undefined;
+  const rgHasPatternOption = command === "rg" && argv.slice(1, argv.includes("--") ? argv.indexOf("--") : undefined)
+    .some((arg) => /^(?:-[ef]|--(?:regexp|file)(?:$|=))/.test(arg));
   for (const arg of argv.slice(1)) {
-    const liked = pathLikeArgument(arg);
+    if (skipValue) {
+      skipValue = false;
+      continue;
+    }
+    if (!afterSeparator && arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    if (!afterSeparator && (
+      (command === "rg" && (arg === "-e" || arg === "--regexp")) ||
+      (gitSubcommand === "commit" && (arg === "-m" || arg === "--message"))
+    )) {
+      skipValue = true;
+      continue;
+    }
+    if (!afterSeparator && (
+      (command === "rg" && /^(?:-e.|--regexp=)/.test(arg)) ||
+      (gitSubcommand === "commit" && /^(?:-m|--message=)/.test(arg))
+    )) continue;
+    if (command === "rg" && !rgHasPatternOption && !rgPattern && (afterSeparator || !arg.startsWith("-"))) {
+      rgPattern = true;
+      continue;
+    }
+    if (!afterSeparator && gitSubcommand === "push" && /^\+?HEAD:[\w./-]+$/.test(arg)) continue;
+    const liked = pathLikeArgument(arg, options.cwd, options.platform, afterSeparator);
     if (!liked) continue;
     let resolved: string;
     try {
