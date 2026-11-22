@@ -1,0 +1,95 @@
+name: Deploy relay worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/relay-worker/**"
+      - "packages/shared/**"
+      - "packages/shell/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/deploy-relay.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One production deploy at a time. A second run waits; cancelling would
+# interrupt a deploy that is already talking to Cloudflare.
+concurrency:
+  group: grokcode-relay-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+
+  refuse-non-main:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to deploy a branch other than main
+        run: |
+          echo "::error::Deploy relay worker publishes the live grokcode-relay worker and only runs from main (this run is ${{ github.ref }})."
+          exit 1
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Require Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=0
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::error::Missing repository secret CLOUDFLARE_API_TOKEN. Create a Cloudflare API token from the 'Edit Cloudflare Workers' template and save it as the CLOUDFLARE_API_TOKEN repository secret."
+            missing=1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "::error::Missing CLOUDFLARE_ACCOUNT_ID. Add the Cloudflare account id as a repository secret, or as an Actions variable with the same name."
+            missing=1
+          fi
+          exit "${missing}"
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Refuse worker secrets declared as plain vars
+        run: node packages/relay-worker/scripts/assert-no-secret-vars.mjs
+      - name: Build packages the worker bundles
+        run: |
+          npm run build -w grokcode-shared
+          npm run build -w grokcode-shell
+      # Wrangler is the version npm ci installed from package-lock.json.
+      # Do not pass worker secrets, --secrets-file, or wrangler secret put.
+      # Secrets already on the worker survive `wrangler deploy`.
+      - name: Deploy grokcode-relay
+        working-directory: packages/relay-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          npx --no-install wrangler --version
+          npx --no-install wrangler deploy
