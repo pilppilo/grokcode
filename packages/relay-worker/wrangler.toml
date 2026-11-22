@@ -12,7 +12,8 @@
 #   {"laptop":"replace-with-a-long-random-token","desktop":"replace-with-another-long-token"}
 #
 # OWNER_EMAILS is a comma-separated allowlist, for example "you@gmail.com".
-# Set either Google credentials plus OWNER_EMAILS, or OWNER_APPROVAL_SECRET.
+# Google sign-in needs OWNER_EMAILS plus Google credentials.
+# Approval-secret mode needs both OWNER_EMAILS and an OWNER_APPROVAL_SECRET of at least 16 characters.
 # Do not put real values in this file.
 
 name = "grokcode-relay"

@@ -58,6 +58,9 @@ if (-not $hasRelay -and -not $hasDirect) {
 if ($hasRelay -and [string]::IsNullOrWhiteSpace($MachineToken)) {
   throw "Relay mode needs -MachineToken."
 }
+if ($hasRelay -and ($MachineToken.Contains("<") -or $MachineToken.Contains(">") -or $MachineToken.Length -lt 16)) {
+  throw "-MachineToken looks like a placeholder. Pass the real per-machine token: at least 16 characters, with no < or >. A placeholder must not be written into agent.env."
+}
 if ($hasDirect -and [string]::IsNullOrWhiteSpace($McpToken)) {
   throw "Direct mode needs -McpToken."
 }
@@ -68,6 +71,7 @@ if ($OpenCodeMode -ne "auto" -and $OpenCodeMode -ne "attach" -and $OpenCodeMode 
   throw "-OpenCodeMode must be auto, attach, or spawn."
 }
 
+$defaultRepo = Join-Path $env:USERPROFILE ".grokcode\repo"
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
   $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   $parent = Split-Path -Parent $scriptDir
@@ -75,13 +79,30 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
   if ($parent -and (Test-Path $marker)) {
     $InstallDir = $parent
   } else {
-    $InstallDir = Join-Path $env:USERPROFILE ".grokcode\repo"
+    $InstallDir = $defaultRepo
   }
 }
+$reusingHomeRepo = [string]::Equals(
+  [System.IO.Path]::GetFullPath($InstallDir),
+  [System.IO.Path]::GetFullPath($defaultRepo),
+  [System.StringComparison]::OrdinalIgnoreCase
+)
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
-  Write-Host "Updating $InstallDir"
-  Invoke-Native { git -C $InstallDir pull --ff-only }
+  if ($reusingHomeRepo) {
+    Write-Host "Updating $InstallDir to latest main"
+    Invoke-Native { git -C $InstallDir fetch origin main }
+    git -C $InstallDir show-ref --verify --quiet refs/heads/main
+    if ($LASTEXITCODE -ne 0) {
+      Invoke-Native { git -C $InstallDir checkout -b main --track origin/main }
+    } else {
+      Invoke-Native { git -C $InstallDir checkout main }
+    }
+    Invoke-Native { git -C $InstallDir pull --ff-only origin main }
+  } else {
+    Write-Host "Updating $InstallDir"
+    Invoke-Native { git -C $InstallDir pull --ff-only }
+  }
 } elseif (Test-Path (Join-Path $InstallDir "packages\agent\package.json")) {
   Write-Host "Using existing checkout at $InstallDir"
 } else {
@@ -165,12 +186,14 @@ if (-not $NoStart) {
 
 $policyExample = Join-Path $InstallDir "packages\shell\policy.example.json"
 $policyCopy = Join-Path $configDir "policy.example.json"
-if ((Test-Path $policyExample) -and -not (Test-Path (Join-Path $configDir "policy.json"))) {
-  Copy-Item $policyExample $policyCopy -Force
-  Write-Host "Shell policy example: $policyCopy"
-  Write-Host "Copy it to $(Join-Path $configDir 'policy.json') and set roots before commands are allowed."
-  Write-Host "On this PC the shell is PowerShell 7 (pwsh). Run the agent as your user, not as Administrator."
+if (-not (Test-Path $policyExample)) {
+  throw "Missing $policyExample. The installer copies this file from the repo it just updated."
 }
+Copy-Item $policyExample $policyCopy -Force
+Write-Host "Shell policy example: $policyCopy"
+Write-Host "Next: copy the example and set roots before commands are allowed:"
+Write-Host '  Copy-Item "$env:USERPROFILE\.config\grokcode\policy.example.json" "$env:USERPROFILE\.config\grokcode\policy.json"'
+Write-Host "On this PC the shell is PowerShell 7 (pwsh). Run the agent as your user, not as Administrator."
 
 Write-Host "Installed grokcode for machine $MachineName."
 Write-Host "Config: $envFile"

@@ -9,7 +9,7 @@ export interface Env {
   MAX_SYNC_WAIT_MS?: string;
   /** Comma-separated Google accounts allowed to complete the shell OAuth flow. */
   OWNER_EMAILS?: string;
-  /** Single-owner approval secret used when Google sign-in is not configured. At least 16 characters. */
+  /** Single-owner approval secret used when Google sign-in is not configured. At least 16 characters. Approval-secret mode also requires OWNER_EMAILS. */
   OWNER_APPROVAL_SECRET?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
