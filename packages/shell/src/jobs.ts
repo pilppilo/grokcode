@@ -58,7 +58,7 @@ export class JobTable {
     private readonly maxJobs = 32,
   ) {}
 
-  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn): JobView {
+  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false): JobView {
     this.evict();
     const running = [...this.jobs.values()].filter((job) => job.status === "running").length;
     if (running >= 8) throw new ToolError("too many commands are already running on this machine.", "busy");
@@ -76,13 +76,22 @@ export class JobTable {
       timedOut: false,
       kill: () => spawned.kill("SIGTERM"),
     };
+    if (keepTail) maxOutput = Math.min(maxOutput, 16_000);
     const publish = (done: boolean) => {
-      job.output = redact(visibleRaw(job.raw, done));
+      if (keepTail && !done) return;
+      const raw = keepTail && job.truncated ? job.raw.slice(job.raw.includes("\n") ? job.raw.indexOf("\n") + 1 : job.raw.length) : job.raw;
+      job.output = redact(visibleRaw(raw, done));
     };
     const push = (chunk: string) => {
-      if (job.truncated) return;
+      if (job.truncated && !keepTail) return;
       job.raw += chunk;
       if (Buffer.byteLength(job.raw) > maxOutput) {
+        if (keepTail) {
+          const bytes = Buffer.from(job.raw);
+          job.raw = bytes.subarray(bytes.length - maxOutput).toString("utf8");
+          job.truncated = true;
+          return;
+        }
         job.raw = clipUtf8(job.raw, maxOutput);
         job.truncated = true;
         void job.kill();
