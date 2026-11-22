@@ -318,3 +318,31 @@ test("missing programs report spawn errors immediately", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("named projects scope relative file paths to their own root", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-project-"));
+  try {
+    const projectRoot = path.join(root, "app");
+    mkdirSync(projectRoot);
+    writeFileSync(path.join(projectRoot, "note.txt"), "inside");
+    writeFileSync(path.join(root, "outside.txt"), "outside");
+    const policy = parsePolicy(JSON.stringify({
+      version: 1,
+      roots: [root],
+      projects: { app: { root: projectRoot, testCommand: ["npm", "test"] } },
+    }), "posix", root);
+    const runtime = runtimeFor(root, policy);
+    const result = await runtime.execute("shell_read_file", { project: "app", path: "note.txt" });
+    assert.match(JSON.stringify(result), /inside/);
+    await assert.rejects(
+      runtime.execute("shell_read_file", { project: "app", path: "../outside.txt" }),
+      /root/i,
+    );
+    await assert.rejects(
+      runtime.execute("shell_read_file", { project: "unknown", path: "note.txt" }),
+      /Available projects: app/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

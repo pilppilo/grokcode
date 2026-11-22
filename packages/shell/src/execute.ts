@@ -15,7 +15,7 @@ import {
   writeFile,
   type FileContext,
 } from "./files.js";
-import { commandBase, withinRoots } from "./confine.js";
+import { commandBase, pathApi, withinRoots } from "./confine.js";
 import { gitCommit, gitInspect, gitStatus, wrapGitCommand } from "./git.js";
 import { searchFiles } from "./search.js";
 import { JobTable } from "./jobs.js";
@@ -63,6 +63,14 @@ export function policyFromFile(file: string | undefined, platform: PathPlatform,
   }
 }
 
+const projectPathField: Partial<Record<string, "path" | "cwd">> = {
+  shell_read_file: "path",
+  shell_list_dir: "path",
+  shell_write_file: "path",
+  shell_search_files: "cwd",
+  shell_apply_patch: "cwd",
+};
+
 export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
   const jobs = options.jobs ?? new JobTable(options.now);
   const spawnImpl = options.spawnImpl ?? defaultSpawn;
@@ -96,6 +104,23 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
     if (op === "shell_kill_job") return jobs.cancel(requiredString(record.jobId, "jobId", 80));
     const policy = requirePolicy(loaded);
     const ctx: FileContext = { policy, platform: options.platform, home: options.home };
+    const field = projectPathField[op];
+    if (field && record.project !== undefined) {
+      const name = requiredString(record.project, "project", 64);
+      const projects = policy.projects ?? {};
+      const project = Object.hasOwn(projects, name) ? projects[name] : undefined;
+      if (!project) {
+        throw new ToolError(`Unknown project "${name}". Available projects: ${Object.keys(projects).join(", ") || "(none)"}.`, "unknown_project");
+      }
+      const root = confineCwd(project.root, ctx);
+      if (!withinRoots(root, [project.root], options.platform)) {
+        throw new ToolError("The project root resolves outside its configured directory.", "path_denied");
+      }
+      ctx.policy = { ...policy, roots: [root] };
+      const input = record[field];
+      const target = input === undefined ? "." : requiredString(input, field, 4096);
+      record = { ...record, [field]: pathApi(options.platform).resolve(root, target) };
+    }
     switch (op) {
       case "shell_run":
         return startCommand(record, ctx, jobs, spawnImpl);
@@ -195,6 +220,9 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
     policySource: loaded.source,
     ...(loaded.error ? { policyError: loaded.error } : {}),
     roots: policy?.roots ?? [],
+    projects: Object.entries(policy?.projects ?? {}).map(([name, { root, defaultBranch, testCommand }]) => ({
+      name, root, defaultBranch, hasTestCommand: Boolean(testCommand),
+    })),
     allowShell: policy?.allowShell ?? false,
     allowInterpreters: policy?.allowInterpreters ?? false,
     commands: policy?.allow.map((rule) => rule.command) ?? [],
