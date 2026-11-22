@@ -18,7 +18,8 @@ import {
 import { commandBase, pathApi, withinRoots } from "./confine.js";
 import { assertProjectRepo, checkRepo, gitCommit, gitInspect, gitStatus, wrapGitCommand } from "./git.js";
 import { searchFiles } from "./search.js";
-import { JobTable } from "./jobs.js";
+import { TaskStore } from "./tasks.js";
+import { JobTable, type JobView } from "./jobs.js";
 import { applyHunks, parseUnifiedDiff } from "./patch.js";
 import { evaluateCommand, evaluateShell, parsePolicy, type LoadedPolicy, type Policy } from "./policy.js";
 import { defaultSpawn, reapDetachedChildren, type SpawnFn } from "./spawn.js";
@@ -29,6 +30,7 @@ export interface ShellRuntimeOptions {
   /** Read on every call so a policy edit applies without a restart. */
   loadPolicy: () => LoadedPolicy;
   auditPath?: string;
+  taskDir?: string;
   /** Policy file and audit log. A root that contains either is refused. */
   protectedPaths?: string[];
   jobs?: JobTable;
@@ -67,6 +69,7 @@ const projectPathField: Partial<Record<string, "path" | "cwd">> = {
   shell_run: "cwd",
   shell_check_repo: "cwd",
   shell_run_tests: "cwd",
+  shell_run_task: "cwd",
   shell_git_status: "cwd",
   shell_git_diff: "cwd",
   shell_git_log: "cwd",
@@ -80,6 +83,7 @@ const projectPathField: Partial<Record<string, "path" | "cwd">> = {
 
 export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
   const jobs = options.jobs ?? new JobTable(options.now);
+  const tasks = options.taskDir ? new TaskStore(options.taskDir, jobs) : undefined;
   const spawnImpl = options.spawnImpl ?? defaultSpawn;
 
   function audit(event: AuditEvent): void {
@@ -88,7 +92,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
 
   async function execute(op: string, params: unknown): Promise<unknown> {
     const record = asRecord(params);
-    const loaded = isolateRoots(options.loadPolicy(), options.platform, options.protectedPaths);
+    const loaded = isolateRoots(options.loadPolicy(), options.platform, [...(options.protectedPaths ?? []), ...(options.taskDir ? [options.taskDir] : [])]);
     const base: AuditEvent = {
       ts: new Date(options.now?.() ?? Date.now()).toISOString(),
       tool: op,
@@ -110,9 +114,16 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
     if (op === "shell_info") return machineInfo(loaded, options);
     if (op === "shell_kill_job") return jobs.cancel(requiredString(record.jobId, "jobId", 80));
     const policy = requirePolicy(loaded);
+    if (op === "shell_task_status" || op === "shell_task_activity" || op === "shell_cancel_task") {
+      if (!tasks) throw new ToolError("Task storage is unavailable.", "task_unavailable");
+      const id = requiredString(record.taskId, "taskId", 80);
+      if (op === "shell_cancel_task") return tasks.cancel(id);
+      if (op === "shell_task_activity") return tasks.activity(id, numberArg(record.offset, "offset", 0, 10_000_000) ?? 0);
+      return tasks.status(id);
+    }
     const ctx: FileContext = { policy, platform: options.platform, home: options.home };
     const field = projectPathField[op];
-    if (field && (record.project !== undefined || op === "shell_check_repo" || op === "shell_run_tests")) {
+    if (field && (record.project !== undefined || op === "shell_check_repo" || op === "shell_run_tests" || op === "shell_run_task")) {
       const name = requiredString(record.project, "project", 64);
       const projects = policy.projects ?? {};
       const project = Object.hasOwn(projects, name) ? projects[name] : undefined;
@@ -134,6 +145,15 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         throw new ToolError("Project commands require argv.", "invalid_argument");
       }
       if (op === "shell_check_repo") return checkRepo(root, ctx, spawnImpl);
+      if (op === "shell_run_task") {
+        if (!tasks) throw new ToolError("Task storage is unavailable.", "task_unavailable");
+        const command = record.task === undefined ? "test" : requiredString(record.task, "task", 64);
+        const argv = command === "test" ? project.testCommand : project.taskCommands?.[command];
+        if (!argv || !Array.isArray(argv)) throw new ToolError(`This project has no configured ${command} command.`, "invalid_argument");
+        return tasks.start(name, command, (publish) => startCommand(
+          { cwd: root, argv }, ctx, jobs, spawnImpl, true, publish,
+        ));
+      }
       if (op === "shell_run_tests") {
         if (!project.testCommand) throw new ToolError("This project has no configured test command.", "invalid_argument");
         const filter = record.filter;
@@ -243,8 +263,8 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
     policySource: loaded.source,
     ...(loaded.error ? { policyError: loaded.error } : {}),
     roots: policy?.roots ?? [],
-    projects: Object.entries(policy?.projects ?? {}).map(([name, { root, defaultBranch, testCommand }]) => ({
-      name, root, defaultBranch, hasTestCommand: Boolean(testCommand),
+    projects: Object.entries(policy?.projects ?? {}).map(([name, { root, defaultBranch, testCommand, taskCommands }]) => ({
+      name, root, defaultBranch, hasTestCommand: Boolean(testCommand), tasks: [...(testCommand ? ["test"] : []), ...Object.keys(taskCommands ?? {})],
     })),
     allowShell: policy?.allowShell ?? false,
     allowInterpreters: policy?.allowInterpreters ?? false,
@@ -255,7 +275,7 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
   };
 }
 
-async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn, keepTail = false) {
+async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void) {
   const shell = record.shell === true;
   const cwd = confineCwd(requiredString(record.cwd, "cwd", 4096), ctx);
   const timeoutMs = Math.min(
@@ -270,7 +290,7 @@ async function startCommand(record: Record<string, unknown>, ctx: FileContext, j
       { argv: [], command, cwd, platform: ctx.platform, shell: true },
       timeoutMs,
       ctx.policy.limits.maxOutputBytes,
-      spawnImpl, keepTail,
+      spawnImpl, keepTail, onChange,
     );
   }
   const argv = stringArray(record.argv, "argv");
@@ -284,14 +304,14 @@ async function startCommand(record: Record<string, unknown>, ctx: FileContext, j
       { argv: wrapped.argv, cwd, platform: ctx.platform, shell: false, env: wrapped.env, roots: ctx.policy.roots },
       timeoutMs,
       ctx.policy.limits.maxOutputBytes,
-      spawnImpl, keepTail,
+      spawnImpl, keepTail, onChange,
     );
   }
   return jobs.start(
     { argv, cwd, platform: ctx.platform, shell: false, roots: ctx.policy.roots },
     timeoutMs,
     ctx.policy.limits.maxOutputBytes,
-    spawnImpl, keepTail,
+    spawnImpl, keepTail, onChange,
   );
 }
 

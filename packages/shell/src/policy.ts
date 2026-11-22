@@ -29,6 +29,7 @@ export interface PolicyLimits {
 export interface Project {
   root: string;
   testCommand?: string[];
+  taskCommands?: Record<string, string[]>;
   defaultBranch?: string;
 }
 
@@ -230,11 +231,24 @@ function parseProjects(value: unknown, roots: string[], platform: PathPlatform, 
         !isBareCommandName(testCommand[0]))) {
       throw new ToolError(`Project "${name}" testCommand must be an argv array.`, "invalid_policy");
     }
+    const taskCommands: Record<string, string[]> = Object.create(null);
+    if (entry.taskCommands !== undefined) {
+      if (!isRecord(entry.taskCommands)) throw new ToolError("taskCommands must be an object.", "invalid_policy");
+      for (const [task, argv] of Object.entries(entry.taskCommands)) {
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(task) || task === "test" ||
+            !Array.isArray(argv) || !argv.every((arg) => typeof arg === "string" && !arg.includes("\0")) ||
+            !isBareCommandName(argv[0])) {
+          throw new ToolError(`Invalid task command "${task}" for project "${name}".`, "invalid_policy");
+        }
+        taskCommands[task] = argv;
+      }
+    }
     if (defaultBranch !== undefined && (typeof defaultBranch !== "string" || !defaultBranch.trim())) {
       throw new ToolError(`Project "${name}" defaultBranch must be a non-empty string.`, "invalid_policy");
     }
     projects[name] = {
       root,
+      ...(entry.taskCommands === undefined ? {} : { taskCommands }),
       ...(testCommand === undefined ? {} : { testCommand }),
       ...(defaultBranch === undefined ? {} : { defaultBranch }),
     };

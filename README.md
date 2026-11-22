@@ -334,3 +334,9 @@ deploy/                systemd, launchd, Windows task and launcher, per-OS insta
 * The agent does not subscribe to `/api/event`. Permission waits are discovered by polling.
 * v1 command and question routes follow the published v1 server doc and may differ on very old builds.
 * Live `opencode serve` was not executed in CI. The HTTP client is tested against fixtures shaped like the current v2 and v1 responses.
+
+### Background tasks
+
+Call `run_task` with a project and an optional task name. It defaults to the project's `testCommand`. Additional named commands such as builds and linters can be configured as argv arrays under the project's `taskCommands` map. Commands still have to pass the machine policy. The caller selects a name and the agent uses the configured arguments.
+
+Keep the returned `task_` ID and use `get_task_status`, `get_task_activity`, or `cancel_task` on the same machine. Activity includes the bounded, redacted output tail after the child exits. Completed tasks can be read after the agent restarts. Tasks that were active during an agent restart are reported as interrupted.
