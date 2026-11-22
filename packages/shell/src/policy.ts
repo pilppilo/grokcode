@@ -444,6 +444,7 @@ function hardDeny(argv: readonly string[], platform: PathPlatform): string | nul
   }
   const name = argv[0] ?? "";
   if (!isBareCommandName(name)) return "command must be a bare name with no path";
+  if (/^agy(?:\.exe|\.cmd|\.bat|\.com|\.ps1)?$/i.test(name)) return "Antigravity is denied";
   if (/\.(?:cmd|bat|com)$/i.test(name)) return "Windows script shims (.cmd, .bat, .com) are denied";
   const base = commandBase(name, platform);
   if (!base) return "command is empty";
