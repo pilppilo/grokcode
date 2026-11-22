@@ -318,3 +318,83 @@ test("missing programs report spawn errors immediately", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("named projects scope relative file paths to their own root", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-project-"));
+  try {
+    const projectRoot = path.join(root, "app");
+    mkdirSync(projectRoot);
+    writeFileSync(path.join(projectRoot, "note.txt"), "inside");
+    writeFileSync(path.join(root, "outside.txt"), "outside");
+    const policy = parsePolicy(JSON.stringify({
+      version: 1,
+      roots: [root],
+      projects: { app: { root: projectRoot, testCommand: ["npm", "test"] } },
+    }), "posix", root);
+    const runtime = runtimeFor(root, policy);
+    const result = await runtime.execute("shell_read_file", { project: "app", path: "note.txt" });
+    assert.match(JSON.stringify(result), /inside/);
+    await assert.rejects(
+      runtime.execute("shell_read_file", { project: "app", path: "../outside.txt" }),
+      /root/i,
+    );
+    await assert.rejects(
+      runtime.execute("shell_read_file", { project: "unknown", path: "note.txt" }),
+      /Available projects: app/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("project test runs finish even when output exceeds the retained tail", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-project-test-"));
+  try {
+    const policy = parsePolicy(JSON.stringify({
+      version: 1,
+      roots: [root],
+      allow: [{ command: "cat" }],
+      projects: { app: { root, testCommand: ["cat", "output.txt"] } },
+    }), "posix", root);
+    writeFileSync(path.join(root, "output.txt"), `${"verbose\n".repeat(40_000)}finished\n`);
+    const runtime = runtimeFor(root, policy);
+    const started = await runtime.execute("shell_run_tests", { project: "app" }) as { jobId: string };
+    let result;
+    for (let i = 0; i < 50; i++) {
+      result = await runtime.execute("shell_job", started) as {
+        status: string; exitCode: number | null; truncated: boolean; output: string;
+      };
+      if (result.status !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(result?.exitCode, 0);
+    assert.equal(result?.truncated, true);
+    assert.match(result?.output ?? "", /finished\n$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("check_repo returns the branch, working tree and recent commits", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-check-repo-"));
+  try {
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root });
+    git("init", "-q", "-b", "main");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "initial");
+    writeFileSync(path.join(root, "note.txt"), "untracked");
+    const policy = parsePolicy(JSON.stringify({
+      version: 1,
+      roots: [root],
+      allow: [{ command: "git", subcommands: ["status", "log"] }],
+      projects: { app: { root } },
+    }), "posix", root);
+    const result = await runtimeFor(root, policy).execute("shell_check_repo", { project: "app" }) as {
+      branch: string; status: string; recentCommits: string[];
+    };
+    assert.equal(result.branch, "main");
+    assert.match(result.status, /note.txt/);
+    assert.match(result.recentCommits[0] ?? "", /initial$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -61,7 +61,7 @@ export async function callShellTool(
       machines: await Promise.all(machines.map(async (machine) => {
         try {
           const info = await backend.call(machine.name, "shell_info", {}, 3_000);
-          return isRecord(info) ? { ...machine, os: info.os, roots: info.roots, policyLoaded: info.policyLoaded } : machine;
+          return isRecord(info) ? { ...machine, os: info.os, roots: info.roots, policyLoaded: info.policyLoaded, projects: info.projects } : machine;
         } catch {
           return machine;
         }
@@ -70,13 +70,13 @@ export async function callShellTool(
   }
   const machine = await resolveMachine(backend, record.machine);
   delete record.machine;
-  if (name === "run_command") {
+  if (name === "run_command" || name === "run_tests") {
     const wait = record.wait !== false;
     delete record.wait;
     const budget = clampWait(record.timeoutMs, options.maxSyncWaitMs ?? DEFAULT_SYNC_WAIT_MS);
     const clock = options.clock ?? realClock;
     const deadline = clock.now() + budget;
-    const started = await backend.call(machine, "shell_run", record, 20_000);
+    const started = await backend.call(machine, name === "run_tests" ? "shell_run_tests" : "shell_run", record, 20_000);
     if (!wait) return started;
     const jobId = isRecord(started) && typeof started.jobId === "string" ? started.jobId : undefined;
     if (!jobId || (isRecord(started) && started.status !== "running")) return started;
@@ -91,7 +91,12 @@ export async function callShellTool(
         break;
       }
       const status = isRecord(last) ? last.status : undefined;
-      if (status && status !== "running") return last;
+      if (status && status !== "running") {
+        if (name === "run_tests" && isRecord(last)) {
+          return { ...last, passed: status === "exited" && last.exitCode === 0 };
+        }
+        return last;
+      }
       const remaining = deadline - clock.now();
       if (remaining <= 0) break;
       await clock.sleep(Math.min(400, remaining));

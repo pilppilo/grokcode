@@ -135,6 +135,40 @@ export async function wrapGitCommand(
   };
 }
 
+export async function assertProjectRepo(cwd: string, ctx: FileContext, spawnImpl?: SpawnFn): Promise<void> {
+  const binary = gitBinary(ctx, spawnImpl);
+  const results = await Promise.all(["--show-toplevel", "--absolute-git-dir", "--git-common-dir"].map(
+    (flag) => runGit(binary, ["rev-parse", "--path-format=absolute", flag], {
+      cwd, ctx, timeoutMs: 5_000, maxOutput: 4096, spawnImpl, allowlist: false,
+    }),
+  ));
+  for (const result of results) {
+    if (result.code !== 0 || result.truncated) throw new ToolError("Cannot locate the project repository.", "git_failed");
+    assertGitDir(result.stdout.trimEnd(), ctx);
+  }
+}
+
+export async function checkRepo(cwd: string, ctx: FileContext, spawnImpl?: SpawnFn) {
+  const binary = gitBinary(ctx, spawnImpl);
+  const common = { cwd, ctx, timeoutMs: 5_000, maxOutput: 16_000, spawnImpl };
+  await assertProjectRepo(cwd, ctx, spawnImpl);
+  const status = await runGit(binary, ["status", "--porcelain=v2", "--branch", "--ignore-submodules=all"], { ...common, allowlist: true });
+  if (status.code !== 0 && !status.truncated) throw new ToolError(redact(status.output), "git_failed");
+  const lines = status.stdout.trimEnd().split(/\r?\n/);
+  const branch = lines.find((line) => line.startsWith("# branch.head "))?.slice(14) ?? null;
+  const upstream = lines.find((line) => line.startsWith("# branch.upstream "))?.slice(18) ?? null;
+  const counts = lines.find((line) => line.startsWith("# branch.ab "))?.match(/\+(\d+) -(\d+)/);
+  const log = lines.includes("# branch.oid (initial)") ? null : await gitInspect(cwd, "log", 5, ctx, spawnImpl);
+  return {
+    cwd, branch, upstream,
+    ahead: counts ? Number(counts[1]) : null,
+    behind: counts ? Number(counts[2]) : null,
+    status: redact(lines.filter((line) => !line.startsWith("# ")).join("\n")),
+    recentCommits: log?.output.trimEnd().split(/\r?\n/) ?? [],
+    truncated: status.truncated || Boolean(log?.truncated),
+  };
+}
+
 export async function gitStatus(cwd: string, ctx: FileContext, spawnImpl?: SpawnFn): Promise<{ cwd: string; output: string }> {
   const binary = gitBinary(ctx, spawnImpl);
   const result = await runGit(binary, ["status", "--porcelain=v1", "-b"], {
