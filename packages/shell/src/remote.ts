@@ -107,5 +107,43 @@ export async function callShellTool(
   if (name === "poll_output") record.view = "poll";
   if (!tool.op) throw new ToolError(`Tool ${name} has no op.`, "unknown_tool");
   const timeout = name === "git_commit_push" ? 90_000 : 20_000;
-  return backend.call(machine, tool.op, record, timeout);
+  const result = await backend.call(machine, tool.op, record, timeout);
+  if (name === "git_commit_push") {
+    const failure = commitPushFailure(result);
+    // isError stays false for a clean commit. A push that fails after the
+    // commit is an error, but the payload still carries the SHA so the
+    // caller retries the push instead of creating a second commit.
+    if (failure) throw new ToolError(failure.message, "push_failed", undefined, failure.details);
+  }
+  return result;
+}
+
+function commitPushFailure(result: unknown): { message: string; details: Record<string, unknown> } | null {
+  if (!isRecord(result) || !isRecord(result.push) || result.push.ok !== false) return null;
+  const sha = typeof result.sha === "string" ? result.sha : "";
+  const branch = typeof result.branch === "string" ? result.branch : "";
+  const error = typeof result.push.error === "string" && result.push.error.trim() !== ""
+    ? result.push.error
+    : "git push failed.";
+  const provided = typeof result.message === "string" ? result.message.trim() : "";
+  const message = provided !== "" ? provided : fallbackPushMessage(sha, branch, error);
+  return {
+    message,
+    details: {
+      committed: true,
+      sha,
+      branch,
+      pushed: false,
+      push: result.push,
+      ...(typeof result.output === "string" ? { output: result.output } : {}),
+    },
+  };
+}
+
+function fallbackPushMessage(sha: string, branch: string, error: string): string {
+  const detail = error.length > 500 ? `${error.slice(0, 500)}…` : error;
+  const created = sha
+    ? `Commit ${sha} was created on branch ${branch || "(unknown)"}.`
+    : `A commit was created on branch ${branch || "(unknown)"}, but its SHA could not be read.`;
+  return `${created} The push failed: ${detail} This commit already exists. Do not create another commit. Retry only the push.`;
 }

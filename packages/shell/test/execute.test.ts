@@ -3,12 +3,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import { ToolError } from "grokcode-shared";
 
 import { createShellRuntime, parsePolicy } from "../src/index.ts";
 import type { Policy } from "../src/policy.ts";
+import type { SpawnFn } from "../src/spawn.ts";
+import { handleStdioMessage, localBackend } from "../src/stdio.ts";
 
 function runtimeFor(root: string, policy: Policy, auditPath?: string) {
   return createShellRuntime({
@@ -212,8 +215,10 @@ test("git_commit_push respects the branch allowlist", async () => {
       message: "add note",
       paths: ["note.txt"],
       push: false,
-    })) as { branch: string };
+    })) as { branch: string; sha: string; pushed: boolean };
     assert.equal(committed.branch, "cursor/test");
+    assert.equal(committed.pushed, false);
+    assert.equal(committed.sha, execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim());
     assert.equal(existsSync(hookMarker), false);
     const diff = await runtime.execute("shell_git_diff", { cwd: root, staged: true }) as { output: string };
     assert.match(diff.output, /staged\.txt/);
@@ -240,7 +245,7 @@ test("git_commit_push respects the branch allowlist", async () => {
     writeFileSync(path.join(root, "other.txt"), "two\n");
     await assert.rejects(
       () => runtime.execute("shell_git_commit", { cwd: root, message: "nope", paths: ["other.txt"] }),
-      /allowlist/,
+      (err: unknown) => err instanceof ToolError && err.code === "branch_denied",
     );
     await assert.rejects(
       () =>
@@ -250,8 +255,230 @@ test("git_commit_push respects the branch allowlist", async () => {
           paths: ["note.txt"],
           push: true,
         }),
-      /push|allowlist/,
+      (err: unknown) => err instanceof ToolError && err.code === "branch_denied",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function gitAvailable(): boolean {
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function initRepo(root: string, branch: string): void {
+  execFileSync("git", ["init", "-b", branch], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "ada@example.com"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Ada"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root, stdio: "ignore" });
+}
+
+function scriptedGit(respond: (argv: readonly string[]) => { code?: number; stdout?: string; stderr?: string }): SpawnFn {
+  return (spec) => {
+    const outcome = respond(spec.argv);
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    return {
+      stdout,
+      stderr,
+      kill() {},
+      onExit(cb) {
+        setImmediate(() => {
+          if (outcome.stdout) stdout.write(outcome.stdout);
+          if (outcome.stderr) stderr.write(outcome.stderr);
+          stdout.end();
+          stderr.end();
+          cb(outcome.code ?? 0, null);
+        });
+      },
+    };
+  };
+}
+
+test("push true is denied before git add when policy git.push is false", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-push-deny-"));
+  const seen: string[] = [];
+  const runtime = createShellRuntime({
+    platform: "posix",
+    home: root,
+    loadPolicy: () => ({
+      policy: basePolicy(root, [{ command: "git", subcommands: ["commit", "push"] }], { branches: ["main"], push: false }),
+      source: "test",
+    }),
+    spawnImpl: scriptedGit((argv) => {
+      for (const name of ["symbolic-ref", "add", "commit", "push", "rev-parse"]) {
+        if (argv.includes(name)) seen.push(name);
+      }
+      return { stdout: argv.includes("symbolic-ref") ? "main\n" : "" };
+    }),
+  });
+  try {
+    await assert.rejects(
+      () => runtime.execute("shell_git_commit", { cwd: root, message: "nope", paths: ["note.txt"], push: true }),
+      (err: unknown) => err instanceof ToolError && err.code === "push_denied" && /disabled/.test(err.message),
+    );
+    assert.deepEqual(seen, ["symbolic-ref"]);
+  } finally {
+    runtime.killAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("push true on an allowlisted branch does not stage or commit when push is disabled", async () => {
+  if (!gitAvailable()) return;
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-push-policy-"));
+  try {
+    initRepo(root, "cursor/test");
+    writeFileSync(path.join(root, "kept.txt"), "kept\n");
+    execFileSync("git", ["add", "--", "kept.txt"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
+    writeFileSync(path.join(root, "kept.txt"), "kept\nstaged\n");
+    execFileSync("git", ["add", "--", "kept.txt"], { cwd: root, stdio: "ignore" });
+    writeFileSync(path.join(root, "new.txt"), "new\n");
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: root, encoding: "utf8" }).trim();
+    const runtime = runtimeFor(
+      root,
+      basePolicy(root, [{ command: "git", subcommands: ["commit", "push"] }], { branches: ["cursor/*"], push: false }),
+    );
+    await assert.rejects(
+      () => runtime.execute("shell_git_commit", { cwd: root, message: "should not land", paths: ["new.txt"], push: true }),
+      (err: unknown) => err instanceof ToolError && err.code === "push_denied",
+    );
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(), head);
+    assert.equal(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: root, encoding: "utf8" }).trim(), staged);
+    assert.equal(staged, "kept.txt");
+    const porcelain = execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" });
+    assert.match(porcelain, /^\?\? new\.txt$/m);
+    assert.doesNotMatch(porcelain, /^[AM]  new\.txt$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed push after a commit returns the SHA instead of throwing", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-push-stub-"));
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const runtime = createShellRuntime({
+    platform: "posix",
+    home: root,
+    loadPolicy: () => ({
+      policy: basePolicy(root, [{ command: "git", subcommands: ["commit", "push"] }], { branches: ["main"], push: true }),
+      source: "test",
+    }),
+    spawnImpl: scriptedGit((argv) => {
+      if (argv.includes("symbolic-ref")) return { stdout: "main\n" };
+      if (argv.includes("rev-parse")) return { stdout: `${sha}\n` };
+      if (argv.includes("push")) return { code: 1, stderr: "fatal: origin unreachable\n" };
+      return {};
+    }),
+  });
+  try {
+    const result = (await runtime.execute("shell_git_commit", {
+      cwd: root,
+      message: "note",
+      paths: ["note.txt"],
+      push: true,
+    })) as {
+      sha: string;
+      pushed: boolean;
+      committed?: boolean;
+      message?: string;
+      push?: { ok: boolean; code: string; error: string };
+    };
+    assert.equal(result.sha, sha);
+    assert.equal(result.pushed, false);
+    assert.equal(result.committed, true);
+    assert.equal(result.push?.ok, false);
+    assert.equal(result.push?.code, "push_failed");
+    assert.match(result.push?.error ?? "", /origin unreachable/);
+    assert.match(result.message ?? "", new RegExp(sha));
+    assert.match(result.message ?? "", /Do not create another commit/);
+    assert.match(result.message ?? "", /Retry only the push/);
+  } finally {
+    runtime.killAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a rejected push keeps the new commit SHA in the result and the MCP error", async () => {
+  if (!gitAvailable()) return;
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-push-fail-"));
+  try {
+    initRepo(root, "cursor/test");
+    writeFileSync(path.join(root, "base.txt"), "base\n");
+    execFileSync("git", ["add", "--", "base.txt"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", path.join(root, "missing.git")], { cwd: root, stdio: "ignore" });
+    const before = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    writeFileSync(path.join(root, "note.txt"), "shipped\n");
+    const runtime = runtimeFor(
+      root,
+      basePolicy(root, [{ command: "git", subcommands: ["commit", "push"] }], { branches: ["cursor/*"], push: true }),
+    );
+    const result = (await runtime.execute("shell_git_commit", {
+      cwd: root,
+      message: "ship note",
+      paths: ["note.txt"],
+      push: true,
+    })) as {
+      sha: string;
+      branch: string;
+      pushed: boolean;
+      committed?: boolean;
+      message?: string;
+      push?: { ok: boolean; code: string; error: string };
+    };
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    assert.notEqual(head, before);
+    assert.equal(result.sha, head);
+    assert.equal(result.branch, "cursor/test");
+    assert.equal(result.pushed, false);
+    assert.equal(result.committed, true);
+    assert.equal(result.push?.ok, false);
+    assert.equal(result.push?.code, "push_failed");
+    assert.match(result.push?.error ?? "", /repository|origin|fatal/i);
+    assert.match(result.message ?? "", new RegExp(head));
+    assert.match(result.message ?? "", /Do not create another commit/);
+    assert.match(result.message ?? "", /Retry only the push/);
+    assert.equal(execFileSync("git", ["show", "HEAD:note.txt"], { cwd: root, encoding: "utf8" }), "shipped\n");
+    writeFileSync(path.join(root, "other.txt"), "again\n");
+    const mcp = (await handleStdioMessage(
+      {
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: {
+          name: "git_commit_push",
+          arguments: { cwd: root, message: "second", paths: ["other.txt"], push: true },
+        },
+      },
+      localBackend("pc", runtime),
+    )) as { result: { isError: boolean; content: Array<{ text: string }> } };
+    assert.equal(mcp.result.isError, true);
+    const body = JSON.parse(mcp.result.content[0]!.text) as {
+      error: string;
+      message: string;
+      sha: string;
+      committed: boolean;
+      pushed: boolean;
+      push: { ok: boolean; error: string };
+    };
+    const head2 = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    assert.equal(body.error, "push_failed");
+    assert.equal(body.sha, head2);
+    assert.equal(body.committed, true);
+    assert.equal(body.pushed, false);
+    assert.equal(body.push.ok, false);
+    assert.match(body.message, new RegExp(head2));
+    assert.match(body.message, /Do not create another commit/);
+    assert.match(body.message, /Retry only the push/);
+    assert.equal(execFileSync("git", ["show", "HEAD:other.txt"], { cwd: root, encoding: "utf8" }), "again\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
