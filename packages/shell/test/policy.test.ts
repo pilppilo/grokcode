@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { expandLexical, withinRoots } from "../src/confine.ts";
+import { expandLexical, isSensitivePath, withinRoots } from "../src/confine.ts";
 import { evaluateCommand, evaluateShell, parsePolicy, quoteCmdArg } from "../src/index.ts";
 import type { Policy } from "../src/policy.ts";
 
@@ -147,4 +147,20 @@ test("search patterns, commit messages and refspecs are distinct from paths", ()
   assert.equal(evaluateCommand(parsed, [".\\git.cmd", "status"], options).allow, false);
   assert.equal(evaluateCommand(parsed, ["git.cmd", "status"], options).allow, false);
   assert.equal(evaluateCommand(parsed, ["C:\\Windows\\System32\\git.exe", "status"], options).allow, false);
+});
+
+test("Antigravity executable names remain denied even when allowlisted", () => {
+  const names = ["agy", "agy.exe", "agy.cmd", "agy.ps1"];
+  const win = policy({ allow: [{ command: "agy" }], allowInterpreters: true }, "win32", "C:\\Users\\ada");
+  for (const name of names) {
+    const decision = evaluateCommand(win, [name], { platform: "win32", cwd: "C:\\Work", home: "C:\\Users\\ada" });
+    assert.equal(decision.allow, false);
+    assert.match(decision.reason, /Antigravity/);
+  }
+});
+
+test("Gemini credential directories are sensitive", () => {
+  assert.equal(isSensitivePath("/home/ada/.gemini/settings.json", "posix"), true);
+  assert.equal(isSensitivePath("C:\\Users\\ada\\.Gemini\\settings.json", "win32"), true);
+  assert.equal(isSensitivePath("/work/.gemini-example/settings.json", "posix"), false);
 });

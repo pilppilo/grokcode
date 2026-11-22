@@ -21,6 +21,7 @@ export interface JobView {
 
 interface Job extends Omit<JobView, "nextOffset"> {
   raw: string;
+  finalized: boolean;
   kill: () => void | Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -60,7 +61,7 @@ export class JobTable {
 
   start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false): JobView {
     this.evict();
-    const running = [...this.jobs.values()].filter((job) => job.status === "running").length;
+    const running = [...this.jobs.values()].filter((job) => !job.finalized).length;
     if (running >= 8) throw new ToolError("too many commands are already running on this machine.", "busy");
     const spawned = spawnImpl(spec);
     const job: Job = {
@@ -72,6 +73,7 @@ export class JobTable {
       cwd: spec.cwd,
       output: "",
       raw: "",
+      finalized: false,
       truncated: false,
       timedOut: false,
       kill: () => spawned.kill("SIGTERM"),
@@ -106,8 +108,6 @@ export class JobTable {
       void Promise.resolve(job.kill()).then(() => {
         if (job.status !== "running") return;
         job.status = "timed_out";
-        job.finishedAt = this.now();
-        publish(true);
       });
     }, timeoutMs);
     spawned.onExit((code, _signal, error) => {
@@ -117,6 +117,7 @@ export class JobTable {
       job.exitCode = code;
       job.finishedAt = job.finishedAt ?? this.now();
       publish(true);
+      job.finalized = true;
     });
     this.jobs.set(job.jobId, job);
     return this.view(job);
@@ -129,10 +130,9 @@ export class JobTable {
   cancel(jobId: string): JobView {
     const job = this.take(jobId);
     if (job.status === "running") {
-      job.kill();
       if (job.timer) clearTimeout(job.timer);
       job.status = "cancelled";
-      job.finishedAt = this.now();
+      job.kill();
     }
     return this.view(job);
   }
@@ -147,7 +147,7 @@ export class JobTable {
       offset: start,
       nextOffset: end,
       output: text.slice(start, end),
-      done: job.status !== "running" && end === text.length,
+      done: job.finalized && end === text.length,
       exitCode: job.exitCode,
       status: job.status,
       truncated: job.truncated,
@@ -157,7 +157,7 @@ export class JobTable {
   killAll(): void {
     for (const job of this.jobs.values()) {
       if (job.timer) clearTimeout(job.timer);
-      if (job.status === "running") job.kill();
+      if (!job.finalized && job.status === "running") job.kill();
     }
   }
 
@@ -187,7 +187,7 @@ export class JobTable {
   private evict(): void {
     if (this.jobs.size < this.maxJobs) return;
     const finished = [...this.jobs.values()]
-      .filter((job) => job.status !== "running")
+      .filter((job) => job.finalized)
       .sort((a, b) => (a.finishedAt ?? a.startedAt) - (b.finishedAt ?? b.startedAt));
     const oldest = finished[0];
     if (oldest) this.jobs.delete(oldest.jobId);
