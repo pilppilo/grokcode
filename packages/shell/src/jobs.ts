@@ -59,7 +59,7 @@ export class JobTable {
     private readonly maxJobs = 32,
   ) {}
 
-  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false): JobView {
+  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void): JobView {
     this.evict();
     const running = [...this.jobs.values()].filter((job) => !job.finalized).length;
     if (running >= 8) throw new ToolError("too many commands are already running on this machine.", "busy");
@@ -118,6 +118,7 @@ export class JobTable {
       job.finishedAt = job.finishedAt ?? this.now();
       publish(true);
       job.finalized = true;
+      onChange?.(this.view(job));
     });
     this.jobs.set(job.jobId, job);
     return this.view(job);

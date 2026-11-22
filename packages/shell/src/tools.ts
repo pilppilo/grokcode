@@ -33,7 +33,42 @@ export interface ShellTool {
 }
 
 const project = { type: "string", description: "Project name from list_machines." };
+const taskId = { type: "string", description: "Task ID returned by run_task." };
 const tools: ShellTool[] = [
+  {
+    name: "run_task",
+    description: "Start a project command configured in local policy and return its task ID. Defaults to the test command.",
+    op: "shell_run_task",
+    annotations: mutating,
+    inputSchema: {
+      type: "object", properties: { machine, project, task: { type: "string", description: "Configured task name. Defaults to test." } },
+      required: ["project"], additionalProperties: false,
+    },
+  },
+  {
+    name: "get_task_status",
+    description: "Get task phase and exit code.",
+    op: "shell_task_status",
+    annotations: readOnly,
+    inputSchema: { type: "object", properties: { machine, taskId }, required: ["taskId"], additionalProperties: false },
+  },
+  {
+    name: "get_task_activity",
+    description: "Read the task's retained output tail. Poll until done.",
+    op: "shell_task_activity",
+    annotations: readOnly,
+    inputSchema: {
+      type: "object", properties: { machine, taskId, offset: { type: "integer", minimum: 0 } },
+      required: ["taskId"], additionalProperties: false,
+    },
+  },
+  {
+    name: "cancel_task",
+    description: "Request task cancellation. Poll activity until the final output is available.",
+    op: "shell_cancel_task",
+    annotations: mutating,
+    inputSchema: { type: "object", properties: { machine, taskId }, required: ["taskId"], additionalProperties: false },
+  },
   {
     name: "check_repo",
     description: "Show local branch, working-tree changes, upstream divergence, and recent commits.",
