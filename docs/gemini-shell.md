@@ -10,7 +10,7 @@ agy         --Streamable HTTP + bearer-->  Worker /gemini/mcp  --WebSocket-->  g
 
 Command output crosses Google and Cloudflare when you use the remote endpoint. Keep the agent on a normal user account, and keep `policy.json` outside the directories the tools are allowed to touch.
 
-Nothing in this repository is deployed for you, and no real token belongs in git.
+No real token belongs in git. The relay worker deploys from GitHub Actions when a change that affects it reaches `main`. See [Deploy the worker](#deploy-the-worker).
 
 ## What the worker exposes
 
@@ -42,6 +42,10 @@ npx wrangler login
 npx wrangler secret put MCP_TOKEN
 npx wrangler secret put MACHINE_TOKENS
 ```
+
+Pushes to `main` also deploy this worker from [`.github/workflows/deploy-relay.yml`](../.github/workflows/deploy-relay.yml) after `npm test` and `npm run typecheck` pass. That workflow needs two repository secrets: `CLOUDFLARE_API_TOKEN` (create the token from the **Edit Cloudflare Workers** template) and `CLOUDFLARE_ACCOUNT_ID` (the account id, stored as a secret or as an Actions variable of the same name). The deploy job uses the GitHub environment `production`.
+
+Set worker secrets separately with `wrangler secret put`. The GitHub deploy does not send or replace them. That includes `MCP_TOKEN`, `MACHINE_TOKENS`, `OWNER_EMAILS`, `OWNER_APPROVAL_SECRET`, and the Google and OAuth secrets below. The full path list is in the README deploy section.
 
 `packages/relay-worker/wrangler.toml` adds a second SQLite Durable Object, `OAuthStoreDO`, in migration `v2`. `wrangler deploy` applies it. Do not put an account id or a hostname in the toml.
 
