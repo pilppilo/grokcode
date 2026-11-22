@@ -39,5 +39,8 @@ tag = "v2"
 new_sqlite_classes = ["OAuthStoreDO"]
 
 [vars]
-# Non-secret. Real tokens are wrangler secrets, not vars.
+# Plain text only. Do not add MCP_TOKEN, MACHINE_TOKENS, OWNER_EMAILS,
+# OWNER_APPROVAL_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+# OAUTH_CLIENTS, PUBLIC_ORIGIN, or OAUTH_PINNED_REDIRECTS here.
+# A var with the same name replaces that wrangler secret on deploy.
 LOG_LEVEL = "info"
