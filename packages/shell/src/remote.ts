@@ -61,7 +61,7 @@ export async function callShellTool(
       machines: await Promise.all(machines.map(async (machine) => {
         try {
           const info = await backend.call(machine.name, "shell_info", {}, 3_000);
-          return isRecord(info) ? { ...machine, os: info.os, roots: info.roots, policyLoaded: info.policyLoaded } : machine;
+          return isRecord(info) ? { ...machine, os: info.os, roots: info.roots, policyLoaded: info.policyLoaded, projects: info.projects } : machine;
         } catch {
           return machine;
         }
