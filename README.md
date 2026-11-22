@@ -89,6 +89,31 @@ npx wrangler secret put MACHINE_TOKENS
 npx wrangler deploy
 ```
 
+### Automatic deploy
+
+Pushes to `main` that affect the relay worker deploy it with [`.github/workflows/deploy-relay.yml`](.github/workflows/deploy-relay.yml). The same workflow can be run from the Actions tab (**Deploy relay worker**). It runs `npm ci`, `npm test`, and `npm run typecheck` on Node 22 (the same commands as [`.github/workflows/test.yml`](.github/workflows/test.yml)), builds `grokcode-shared` and `grokcode-shell`, then runs `wrangler deploy` from `packages/relay-worker` with the Wrangler version pinned in `package-lock.json`. Deploy runs only after those checks pass, and only from `main`. The deploy job uses the GitHub environment `production`, so approval rules can be added there later.
+
+The workflow reads two repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | What to store |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | API token created from the **Edit Cloudflare Workers** template, scoped to this account. |
+| `CLOUDFLARE_ACCOUNT_ID` | Account id. This is not a credential. Store it as this secret, or as an Actions variable with the same name. |
+
+If either value is missing, the deploy job stops before it calls Wrangler.
+
+Set worker secrets separately with `wrangler secret put`. The workflow does not send them, and a deploy leaves the secrets already on the worker in place. That includes `MCP_TOKEN`, `MACHINE_TOKENS`, `OWNER_EMAILS`, and `OWNER_APPROVAL_SECRET`, plus `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OAUTH_CLIENTS`, `PUBLIC_ORIGIN`, and `OAUTH_PINNED_REDIRECTS`. Do not put those names under `[vars]` in `packages/relay-worker/wrangler.toml`. A plain var with the same name would replace the secret.
+
+The workflow runs when these paths change:
+
+* `packages/relay-worker/**`
+* `packages/shared/**`
+* `packages/shell/**`
+* `package.json`
+* `package-lock.json`
+* `tsconfig.base.json`
+* `.github/workflows/deploy-relay.yml`
+
 On the Workers Free plan, register a `workers.dev` subdomain before the first deploy. In the dashboard, open Workers & Pages and set **Your subdomain**. Wrangler prompts for one if it is missing. That name is account-wide. Do not commit it. The deployed URL is `https://<worker-name>.<your-subdomain>.workers.dev`.
 
 Free-plan Durable Objects must use the SQLite backend. `packages/relay-worker/wrangler.toml` creates `RelayHubDO` with `new_sqlite_classes`. The hub routes over hibernated WebSockets and does not use key-value storage, so that backend needs no application change.
