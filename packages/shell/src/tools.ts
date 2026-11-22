@@ -32,7 +32,27 @@ export interface ShellTool {
   annotations: ToolAnnotations;
 }
 
+const project = { type: "string", description: "Project name from list_machines." };
 const tools: ShellTool[] = [
+  {
+    name: "check_repo",
+    description: "Show local branch, working-tree changes, upstream divergence, and recent commits.",
+    op: "shell_check_repo",
+    annotations: readOnly,
+    inputSchema: { type: "object", properties: { machine, project }, required: ["project"], additionalProperties: false },
+  },
+  {
+    name: "run_tests",
+    description: "Run the project policy's configured test command. Poll the returned job ID if the tests are still running.",
+    op: "shell_run_tests",
+    annotations: mutating,
+    inputSchema: {
+      type: "object",
+      properties: { machine, project, filter: { type: "string", description: "One positional test filter." } },
+      required: ["project"],
+      additionalProperties: false,
+    },
+  },
   {
     name: "list_machines",
     description: "List connected PCs with OS and allowed roots when available. Read-only.",
@@ -276,7 +296,7 @@ const tools: ShellTool[] = [
   },
 ];
 
-const projectFileTools = new Set(["read_file", "list_dir", "write_file", "search_files", "apply_patch"]);
+const projectFileTools = new Set(["run_command", "read_file", "list_dir", "write_file", "search_files", "apply_patch", "git_status", "git_diff", "git_log", "git_commit_push"]);
 
 export const SHELL_TOOLS: ShellTool[] = tools.map((tool) => {
   const title = tool.name.replaceAll("_", " ").replace(/^./, (first) => first.toUpperCase());

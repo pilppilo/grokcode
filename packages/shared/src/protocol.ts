@@ -9,6 +9,8 @@ export const PROTOCOL_VERSION = 1;
 export const SHELL_OPS = [
   "shell_info",
   "shell_run",
+  "shell_run_tests",
+  "shell_check_repo",
   "shell_job",
   "shell_kill_job",
   "shell_search_files",
