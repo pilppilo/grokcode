@@ -1,6 +1,5 @@
 # Registers a per-user scheduled task that runs start-agent.ps1 at logon.
-# The task action is:
-#   powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File <cfg>\start-agent.ps1
+# Windows Script Host launches the supervisor without allocating a console.
 # It restarts up to 10 times, once a minute, with no execution time limit.
 # Re-running this script replaces the task. It does not print secrets.
 #
@@ -104,9 +103,10 @@ if (Test-Path (Join-Path $ConfigDir "agent.env")) {
   Grant-CurrentUserOnly (Join-Path $ConfigDir "agent.env")
 }
 
-$powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$argument = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
-$action = New-ScheduledTaskAction -Execute $powershell -Argument $argument
+$wrapper = Join-Path $ConfigDir "start-agent.js"
+Copy-Item -Force (Join-Path $PSScriptRoot "start-agent.js") $wrapper
+$wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+$action = New-ScheduledTaskAction -Execute $wscript -Argument "//B //Nologo `"$wrapper`"" -WorkingDirectory $ConfigDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 try { $settings.MultipleInstances = "IgnoreNew" } catch { }

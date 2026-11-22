@@ -196,7 +196,7 @@ From a checkout you already have:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy\install-windows.ps1 -MachineName desktop -RelayUrl "wss://YOUR_WORKER.workers.dev/agent" -MachineToken "PASTE_TOKEN" -DefaultModel "opencode-go/deepseek-v4.1-flash" -SetOpenCodeModel
 ```
 
-The task runs `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File %USERPROFILE%\.config\grokcode\start-agent.ps1` at logon. The launcher loads `agent.env`, puts Node and npm on `PATH`, and loops: it logs a timestamped `starting agent` line, runs `node dist\cli.js` with hidden stdout and stderr logs, then waits 10 seconds after the process exits. Task Scheduler also restarts the launcher up to 10 times, a minute apart, with no execution time limit. Re-running the installer replaces the task. Logs (`agent.log`, `agent-out.log`, `agent-err.log`) rotate at 1 MB. `-NoStart` registers the task without starting it. Add `-Listen 127.0.0.1:8788 -McpToken "..."` for direct mode, with or without the relay.
+At logon and on task restart, Windows Script Host starts the PowerShell supervisor without opening a terminal window. The launcher loads `agent.env`, puts Node and npm on `PATH`, and loops: it logs a timestamped `starting agent` line, runs `node dist\cli.js` with hidden stdout and stderr logs, then waits 10 seconds after the process exits. Task Scheduler also restarts the launcher up to 10 times, a minute apart, with no execution time limit. Re-running the installer replaces the task. Logs (`agent.log`, `agent-out.log`, `agent-err.log`) rotate at 1 MB. `-NoStart` registers the task without starting it. Add `-Listen 127.0.0.1:8788 -McpToken "..."` for direct mode, with or without the relay.
 
 ### Linux
 
