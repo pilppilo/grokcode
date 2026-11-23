@@ -398,3 +398,39 @@ test("check_repo returns the branch, working tree and recent commits", async () 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("task tools persist completed output and reject unconfigured projects", async () => {
+  const parent = mkdtempSync(path.join(tmpdir(), "grokcode-task-"));
+  const root = path.join(parent, "project");
+  mkdirSync(root);
+  try {
+    const policy = parsePolicy(JSON.stringify({
+      version: 1,
+      roots: [root],
+      allow: [{ command: "echo" }],
+      projects: { app: { root, taskCommands: { build: ["echo", "finished"], denied: ["cat", "missing"] } }, other: { root } },
+    }), "posix", parent);
+    const create = () => createShellRuntime({
+      platform: "posix", home: parent, taskDir: path.join(parent, "tasks"),
+      loadPolicy: () => ({ policy, source: "test" }),
+    });
+    const runtime = create();
+    await assert.rejects(runtime.execute("shell_run_task", { project: "other" }), /no configured test/);
+    await assert.rejects(runtime.execute("shell_run_task", { project: "app", task: "denied" }), /allowlist/);
+    const started = await runtime.execute("shell_run_task", { project: "app", task: "build" }) as { taskId: string };
+    assert.match(started.taskId, /^task_/);
+    let result: { done: boolean; exitCode: number; tail: string } | undefined;
+    for (let i = 0; i < 50; i++) {
+      result = await runtime.execute("shell_task_activity", started) as typeof result;
+      if (result?.done) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(result?.done, true);
+    assert.equal(result?.exitCode, 0);
+    assert.match(result?.tail ?? "", /finished/);
+    assert.equal(readFileSync(path.join(parent, "tasks", `${started.taskId}.log`), "utf8"), "finished\n");
+    assert.deepEqual(await create().execute("shell_task_activity", started), result);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
