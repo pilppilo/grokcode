@@ -2,6 +2,7 @@
 import { pathToFileURL } from "node:url";
 
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { HELP, homeFromEnv, loadConfig, parseListen, validateConfig, type AgentConfig } from "./config.js";
 import { ensureOpenCode } from "./ownership.js";
@@ -17,21 +18,6 @@ const VERSION = "0.1.0";
 interface Io {
   log: (line: string) => void;
   error: (line: string) => void;
-}
-
-async function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
 }
 
 export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal: AbortSignal): Promise<number> {
@@ -207,7 +193,12 @@ async function relayLoop(
       io.error(`Relay connection failed: ${message}`);
     }
     if (signal.aborted) break;
-    await sleep(delay, signal);
+    try {
+      await sleep(delay, undefined, { signal });
+    } catch (error) {
+      if (signal.aborted) break;
+      throw error;
+    }
     delay = Math.min(delay * 2, 30_000);
   }
 }
