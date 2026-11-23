@@ -100,7 +100,7 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
     platform: shellPlatform,
     home: shellHome,
     loadPolicy: () => policyFromFile(policyPath, shellPlatform, shellHome),
-    ...(config.configDir ? { auditPath: path.join(config.configDir, "shell-audit.log") } : {}),
+    ...(config.configDir ? { auditPath: path.join(config.configDir, "shell-audit.log"), taskDir: path.join(config.configDir, "shell-tasks") } : {}),
   });
   io.log(
     policyPath
