@@ -58,17 +58,18 @@ export function runRelayConnection(options: RelayConnectionOptions): Promise<voi
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = () => {
-      if (settled) return;
+    const cleanup = () => {
+      if (settled) return false;
       settled = true;
       clearInterval(ping);
-      resolve();
+      options.signal.removeEventListener("abort", onAbort);
+      return true;
+    };
+    const finish = () => {
+      if (cleanup()) resolve();
     };
     const fail = (err: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearInterval(ping);
-      reject(err instanceof Error ? err : new Error(String(err)));
+      if (cleanup()) reject(err instanceof Error ? err : new Error(String(err)));
     };
 
     const ping = setInterval(() => {

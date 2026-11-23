@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 
 import { encodeMessage, MAX_FRAME, parseChunkedResult, parseMessage } from "grokcode-shared";
@@ -123,4 +124,32 @@ test("a result larger than the websocket budget is sent as marked chunks", async
   socket.close();
   await done;
   ac.abort();
+});
+
+test("reconnecting releases each session's abort listener on close and error", async () => {
+  const { signal } = new AbortController();
+  signal.addEventListener("abort", () => {});
+  const baseline = getEventListeners(signal, "abort").length;
+
+  for (const outcome of ["close", "error", "close"] as const) {
+    const socket = new FakeSocket();
+    const done = runRelayConnection({
+      url: "ws://relay.example/agent",
+      name: "laptop",
+      token: "machine-token-0123456789abcd",
+      signal,
+      execute: async () => ({}),
+      connect: () => socket,
+    });
+    assert.equal(getEventListeners(signal, "abort").length, baseline + 1);
+    if (outcome === "error") {
+      const failure = assert.rejects(done, /connection failed/);
+      socket.emit("error", new Error("connection failed"));
+      await failure;
+    } else {
+      socket.close();
+      await done;
+    }
+    assert.equal(getEventListeners(signal, "abort").length, baseline);
+  }
 });
