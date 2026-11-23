@@ -428,6 +428,7 @@ test("task tools persist completed output and reject unconfigured projects", asy
     assert.equal(result?.done, true);
     assert.equal(result?.exitCode, 0);
     assert.match(result?.tail ?? "", /finished/);
+    assert.equal(readFileSync(path.join(parent, "tasks", `${started.taskId}.log`), "utf8"), "finished\n");
     assert.deepEqual(await create().execute("shell_task_activity", started), result);
   } finally {
     rmSync(parent, { recursive: true, force: true });

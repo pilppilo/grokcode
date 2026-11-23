@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { ToolError } from "grokcode-shared";
@@ -9,6 +9,7 @@ import type { JobTable, JobView } from "./jobs.js";
 interface StoredTask {
   project: string;
   command: string;
+  logIncomplete?: boolean;
   job?: Pick<JobView, "status" | "exitCode" | "finishedAt" | "output" | "truncated">;
 }
 
@@ -18,13 +19,23 @@ export class TaskStore {
 
   constructor(private readonly directory: string, private readonly jobs: JobTable) {}
 
-  async start(project: string, command: string, launch: (publish: (job: JobView) => void) => Promise<JobView>) {
+  async start(project: string, command: string, launch: (publish: (job: JobView) => void, capture: (chunk: Buffer | string) => void) => Promise<JobView>) {
     const taskId = `task_${randomBytes(12).toString("hex")}`;
     this.save(taskId, { project, command });
+    const log = this.file(taskId, "log");
+    let logIncomplete = false;
+    const capture = (chunk: Buffer | string) => {
+      if (logIncomplete) return;
+      try {
+        appendFileSync(log, chunk, { mode: 0o600 });
+      } catch {
+        logIncomplete = true;
+      }
+    };
     const finish = (job: JobView) => {
       this.active.delete(taskId);
       const { status, exitCode, finishedAt, output, truncated } = job;
-      const stored = { project, command, job: { status, exitCode, ...(finishedAt === undefined ? {} : { finishedAt }), output, truncated } };
+      const stored = { project, command, logIncomplete, job: { status, exitCode, ...(finishedAt === undefined ? {} : { finishedAt }), output, truncated } };
       try {
         this.save(taskId, stored);
       } catch {
@@ -33,7 +44,7 @@ export class TaskStore {
     };
     let job: JobView;
     try {
-      job = await launch(finish);
+      job = await launch(finish, capture);
     } catch (error) {
       try { rmSync(this.file(taskId), { force: true }); } catch { /* preserve the launch error */ }
       throw error;
@@ -55,11 +66,12 @@ export class TaskStore {
   }
 
   activity(taskId: string, offset: number) {
-    const { job } = this.lookup(taskId);
+    const { job, logIncomplete } = this.lookup(taskId);
     const summary = this.status(taskId);
     const tail = job?.output ?? "";
     const start = Math.min(offset, tail.length);
-    return { ...summary, offset: start, nextOffset: tail.length, tail: tail.slice(start), truncated: job?.truncated ?? false };
+    const logBytes = statSync(this.file(taskId, "log"), { throwIfNoEntry: false })?.size ?? 0;
+    return { ...summary, logBytes, logIncomplete: logIncomplete ?? false, offset: start, nextOffset: tail.length, tail: tail.slice(start), truncated: job?.truncated ?? false };
   }
 
   cancel(taskId: string) {
@@ -89,7 +101,7 @@ export class TaskStore {
     renameSync(`${file}.tmp`, file);
   }
 
-  private file(taskId: string) {
-    return path.join(this.directory, `${taskId}.json`);
+  private file(taskId: string, extension = "json") {
+    return path.join(this.directory, `${taskId}.${extension}`);
   }
 }
