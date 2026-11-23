@@ -224,6 +224,31 @@ export async function gitInspect(
   };
 }
 
+export interface GitCommitResult {
+  branch: string;
+  /** Full HEAD SHA after a successful commit. Empty only when Git could not print it. */
+  sha: string;
+  pushed: boolean;
+  output: string;
+  /**
+   * Present when the commit exists and the requested push did not succeed.
+   * Callers must retry the push only; creating another commit would duplicate it.
+   */
+  committed?: true;
+  push?: { ok: false; code: "push_failed" | "timeout"; error: string };
+  /** Self-correcting note for a commit that landed and a push that did not. */
+  message?: string;
+}
+
+/** Tell a caller the commit is already in history and only the push should be retried. */
+export function commitPushMessage(sha: string, branch: string, error: string): string {
+  const detail = error.length > 500 ? `${error.slice(0, 500)}…` : error;
+  const created = sha
+    ? `Commit ${sha} was created on branch ${branch || "(unknown)"}.`
+    : `A commit was created on branch ${branch || "(unknown)"}, but its SHA could not be read.`;
+  return `${created} The push failed: ${detail} This commit already exists. Do not create another commit. Retry only the push.`;
+}
+
 export async function gitCommit(
   options: {
     cwd: string;
@@ -235,7 +260,7 @@ export async function gitCommit(
     push: boolean;
   },
   spawnImpl?: SpawnFn,
-): Promise<{ branch: string; output: string; pushed: boolean }> {
+): Promise<GitCommitResult> {
   const ctx: FileContext = { policy: options.policy, platform: options.platform, home: options.home };
   const { cwd, platform, policy } = options;
   if (options.message.trim() === "" || options.message.includes("\0") || options.message.length > 5_000) {
@@ -264,6 +289,11 @@ export async function gitCommit(
   if (branchResult.code !== 0 || !branchAllowed(branch, policy.git.branches)) {
     throw new ToolError(`branch "${branch || "(unknown)"}" is not in the git branch allowlist.`, "branch_denied");
   }
+  // A disabled push must fail before git add or git commit. Otherwise the
+  // caller sees push_denied while HEAD already contains the new commit.
+  if (options.push && !policy.git.push) {
+    throw new ToolError("git push is disabled in the machine policy.", "push_denied");
+  }
   const add = await runGit(binary, ["--literal-pathspecs", "add", "--", ...options.paths], {
     cwd,
     ctx,
@@ -282,10 +312,11 @@ export async function gitCommit(
     allowlist: false,
   });
   if (commit.code !== 0) throw new ToolError(redact(commit.output).trim() || "git commit failed.", "git_failed");
-  let pushed = false;
-  let pushOutput = "";
-  if (options.push) {
-    if (!policy.git.push) throw new ToolError("git push is disabled in the machine policy.", "push_denied");
+  const sha = await headSha(binary, cwd, ctx, spawnImpl);
+  if (!options.push) {
+    return { branch, sha, pushed: false, output: redact(commit.output) };
+  }
+  try {
     const pushedResult = await runGit(binary, ["push", "origin", `HEAD:${branch}`], {
       cwd,
       ctx,
@@ -294,9 +325,59 @@ export async function gitCommit(
       spawnImpl,
       allowlist: false,
     });
-    if (pushedResult.code !== 0) throw new ToolError(redact(pushedResult.output).trim() || "git push failed.", "git_failed");
-    pushed = true;
-    pushOutput = pushedResult.output;
+    if (!pushedResult.timedOut && pushedResult.code === 0) {
+      return {
+        branch,
+        sha,
+        pushed: true,
+        output: redact([commit.output, pushedResult.output].filter(Boolean).join("\n")),
+      };
+    }
+    const error = pushedResult.timedOut
+      ? "git push timed out."
+      : redact(pushedResult.output).trim() || "git push failed.";
+    return failedPush(branch, sha, commit.output, pushedResult.output, pushedResult.timedOut ? "timeout" : "push_failed", error);
+  } catch (err) {
+    const error = err instanceof ToolError ? err.message : "git push failed.";
+    const code = err instanceof ToolError && err.code === "timeout" ? "timeout" : "push_failed";
+    return failedPush(branch, sha, commit.output, "", code, error);
   }
-  return { branch, pushed, output: redact([commit.output, pushOutput].filter(Boolean).join("\n")) };
+}
+
+function failedPush(
+  branch: string,
+  sha: string,
+  commitOutput: string,
+  pushOutput: string,
+  code: "push_failed" | "timeout",
+  error: string,
+): GitCommitResult {
+  const pushError = redact(error).trim() || "git push failed.";
+  return {
+    branch,
+    sha,
+    committed: true,
+    pushed: false,
+    output: redact([commitOutput, pushOutput].filter(Boolean).join("\n")),
+    push: { ok: false, code, error: pushError },
+    message: commitPushMessage(sha, branch, pushError),
+  };
+}
+
+async function headSha(binary: string, cwd: string, ctx: FileContext, spawnImpl?: SpawnFn): Promise<string> {
+  try {
+    const result = await runGit(binary, ["rev-parse", "--verify", "HEAD"], {
+      cwd,
+      ctx,
+      timeoutMs: 15_000,
+      maxOutput: 4_000,
+      spawnImpl,
+      allowlist: false,
+    });
+    if (result.timedOut || result.code !== 0) return "";
+    const sha = result.stdout.trim();
+    return /^[0-9a-f]{7,64}$/i.test(sha) ? sha : "";
+  } catch {
+    return "";
+  }
 }

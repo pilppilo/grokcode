@@ -94,6 +94,22 @@ function toolResult(payload: unknown, isError = false, preserve = false): { cont
   return { content: [{ type: "text", text: preserve ? text : truncate(text) }], isError };
 }
 
+/** Tool failures keep their code and message, plus any structured details (for example a commit SHA). */
+function toolErrorPayload(err: unknown): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    error: errorCode(err),
+    message: errorMessage(err),
+  };
+  if (err instanceof GrokcodeError && typeof err.status === "number") payload.status = err.status;
+  if (err instanceof GrokcodeError && isRecord(err.details)) {
+    for (const [key, value] of Object.entries(err.details)) {
+      if (key === "error" || key === "message" || key === "status") continue;
+      payload[key] = value;
+    }
+  }
+  return payload;
+}
+
 const TEXT_LIMIT = 80_000;
 
 function truncate(text: string): string {
@@ -289,18 +305,7 @@ function handleRpc(message: JsonRpc, options: McpHandlerOptions): Promise<unknow
     const args = isRecord(params) ? params.arguments ?? {} : {};
     return callTool(options, name, args).then(
       (data) => rpcResult(id, toolResult(data, false, options.preserveToolResults)),
-      (err: unknown) =>
-        rpcResult(
-          id,
-          toolResult(
-            {
-              error: errorCode(err),
-              message: errorMessage(err),
-              ...(err instanceof GrokcodeError && err.status ? { status: err.status } : {}),
-            },
-            true,
-          ),
-        ),
+      (err: unknown) => rpcResult(id, toolResult(toolErrorPayload(err), true, options.preserveToolResults)),
     );
   }
   if (method === "resources/list") return rpcResult(id, { resources: [] });

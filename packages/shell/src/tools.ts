@@ -11,7 +11,7 @@ export const SHELL_INSTRUCTIONS = [
   "Commands are deny-by-default. A command must match the per-machine allowlist, and a hard deny list blocks privilege escalation, recursive deletes of a drive root, and argument-based code execution such as git -c.",
   "wait defaults to true and blocks for up to about 20 seconds. Poll get_job or poll_output for running jobs, or use kill_job to cancel.",
   "read_file, list_dir, write_file, and apply_patch stay inside the allowed roots and refuse symlink escapes.",
-  "git_commit_push only commits paths you name, and only on a branch in the policy allowlist. Push stays off unless the policy sets git.push.",
+  "git_commit_push only commits paths you name, and only on a branch in the policy allowlist. Push stays off unless the policy sets git.push. If push is requested while git.push is false, nothing is staged or committed. A successful result includes the commit SHA. If the commit succeeds and the push fails, the error includes that SHA: retry only the push and do not create another commit.",
   "Mutating tools are marked destructive so the client can ask the owner to confirm. There is no second prompt on the PC.",
 ].join(" ");
 
@@ -313,7 +313,7 @@ const tools: ShellTool[] = [
   {
     name: "git_commit_push",
     description:
-      "Stage the named relative paths, commit them, and optionally push. The current branch must match the policy branch allowlist. Force push is impossible. push true is rejected unless policy git.push is true. Destructive: the client should ask the owner to confirm.",
+      "Stage the named relative paths, commit them, and optionally push. The current branch must match the policy branch allowlist. Force push is impossible. push true is rejected before anything is staged or committed unless policy git.push is true, and that rejection leaves the index and HEAD unchanged. A successful result includes the commit SHA. If the commit succeeds and the push then fails, the tool result is an error that still includes the commit SHA and the push error: the commit already exists, so retry only the push and do not create another commit. Destructive: the client should ask the owner to confirm.",
     op: "shell_git_commit",
     annotations: mutating,
     inputSchema: {
@@ -323,7 +323,11 @@ const tools: ShellTool[] = [
         cwd: { type: "string", description: "Absolute repository directory inside the allowed roots." },
         message: { type: "string", description: "Commit message." },
         paths: { type: "array", items: { type: "string" }, minItems: 1, description: "Relative paths to stage. No git add -A." },
-        push: { type: "boolean", description: "Push HEAD to origin under the same branch name. Default false." },
+        push: {
+          type: "boolean",
+          description:
+            "Push HEAD to origin under the same branch name. Default false. When policy git.push is false, true is denied before any git add or git commit.",
+        },
       },
       required: ["cwd", "message", "paths"],
       additionalProperties: false,

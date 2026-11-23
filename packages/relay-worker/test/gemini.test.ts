@@ -196,3 +196,82 @@ test("an oauth access token can call the shell endpoint and the original /mcp st
   assert.ok(classicBody.result.tools.some((tool) => tool.name === "start_session"));
   assert.equal(classicBody.result.tools.some((tool) => tool.name === "apply_patch"), false);
 });
+
+test("gemini surfaces a push failure as an error that still contains the commit SHA", async () => {
+  const sha = "abc123def456abc123def456abc123def456abcd";
+  let mode: "clean" | "local" | "failed" | "fallback" = "clean";
+  const hub: HubBridge = {
+    async listMachines() {
+      return [{ name: "expinsider", connectedAt: 1 }];
+    },
+    async call() {
+      if (mode === "clean") return { branch: "main", sha, pushed: true, output: "ok" };
+      if (mode === "local") return { branch: "main", sha, pushed: false, output: "committed" };
+      if (mode === "fallback") {
+        return {
+          branch: "main",
+          sha,
+          pushed: false,
+          output: "nope",
+          push: { ok: false, code: "push_failed", error: "origin unreachable" },
+        };
+      }
+      return {
+        branch: "main",
+        sha,
+        pushed: false,
+        committed: true,
+        output: "rejected",
+        push: { ok: false, code: "push_failed", error: "origin unreachable" },
+        message: `Commit ${sha} was created on branch main. The push failed: origin unreachable. This commit already exists. Do not create another commit. Retry only the push.`,
+      };
+    },
+  };
+  async function callTool(): Promise<{ isError: boolean; json: Record<string, unknown> }> {
+    const response = await handleRelayRequest(
+      new Request("https://relay.example/gemini/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${MCP}`,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 9,
+          method: "tools/call",
+          params: {
+            name: "git_commit_push",
+            arguments: { cwd: "/src", message: "note", paths: ["a.txt"], push: true },
+          },
+        }),
+      }),
+      { mcpToken: MCP, bridge: hub, oauth: oauth() },
+    );
+    const body = (await response.json()) as { result: { isError: boolean; content: { text: string }[] } };
+    return { isError: body.result.isError, json: JSON.parse(body.result.content[0]!.text) as Record<string, unknown> };
+  }
+  const clean = await callTool();
+  assert.equal(clean.isError, false);
+  assert.equal(clean.json.sha, sha);
+  mode = "local";
+  const local = await callTool();
+  assert.equal(local.isError, false);
+  assert.equal(local.json.pushed, false);
+  mode = "failed";
+  const failed = await callTool();
+  assert.equal(failed.isError, true);
+  assert.equal(failed.json.error, "push_failed");
+  assert.equal(failed.json.sha, sha);
+  assert.equal(failed.json.committed, true);
+  assert.equal(failed.json.pushed, false);
+  assert.match(String(failed.json.message), /Do not create another commit/);
+  assert.match(String(failed.json.message), /Retry only the push/);
+  mode = "fallback";
+  const fallback = await callTool();
+  assert.equal(fallback.isError, true);
+  assert.equal(fallback.json.sha, sha);
+  assert.match(String(fallback.json.message), new RegExp(sha));
+  assert.match(String(fallback.json.message), /Do not create another commit/);
+  assert.match(String(fallback.json.message), /Retry only the push/);
+});
