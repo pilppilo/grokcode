@@ -19,7 +19,7 @@ export interface FsLike {
   readSync(fd: number, buffer: Buffer, offset: number, length: number, position: number): number;
 }
 
-const SECRET_DIRS = new Set([".ssh", ".aws", ".gnupg", ".kube", ".docker"]);
+const SECRET_DIRS = new Set([".ssh", ".aws", ".gnupg", ".kube", ".docker", ".gemini"]);
 const SECRET_FILES = new Set([
   ".npmrc",
   ".netrc",

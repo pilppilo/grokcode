@@ -21,6 +21,7 @@ export interface JobView {
 
 interface Job extends Omit<JobView, "nextOffset"> {
   raw: string;
+  finalized: boolean;
   kill: () => void | Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -58,9 +59,9 @@ export class JobTable {
     private readonly maxJobs = 32,
   ) {}
 
-  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false): JobView {
+  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void, onOutput?: (chunk: Buffer | string) => void): JobView {
     this.evict();
-    const running = [...this.jobs.values()].filter((job) => job.status === "running").length;
+    const running = [...this.jobs.values()].filter((job) => !job.finalized).length;
     if (running >= 8) throw new ToolError("too many commands are already running on this machine.", "busy");
     const spawned = spawnImpl(spec);
     const job: Job = {
@@ -72,6 +73,7 @@ export class JobTable {
       cwd: spec.cwd,
       output: "",
       raw: "",
+      finalized: false,
       truncated: false,
       timedOut: false,
       kill: () => spawned.kill("SIGTERM"),
@@ -82,9 +84,10 @@ export class JobTable {
       const raw = keepTail && job.truncated ? job.raw.slice(job.raw.includes("\n") ? job.raw.indexOf("\n") + 1 : job.raw.length) : job.raw;
       job.output = redact(visibleRaw(raw, done));
     };
-    const push = (chunk: string) => {
+    const push = (chunk: Buffer | string) => {
+      onOutput?.(chunk);
       if (job.truncated && !keepTail) return;
-      job.raw += chunk;
+      job.raw += String(chunk);
       if (Buffer.byteLength(job.raw) > maxOutput) {
         if (keepTail) {
           const bytes = Buffer.from(job.raw);
@@ -98,16 +101,14 @@ export class JobTable {
       }
       publish(false);
     };
-    spawned.stdout?.on("data", (chunk: string) => push(String(chunk)));
-    spawned.stderr?.on("data", (chunk: string) => push(String(chunk)));
+    spawned.stdout?.on("data", (chunk: Buffer | string) => push(chunk));
+    spawned.stderr?.on("data", (chunk: Buffer | string) => push(chunk));
     job.timer = setTimeout(() => {
       if (job.status !== "running") return;
       job.timedOut = true;
       void Promise.resolve(job.kill()).then(() => {
         if (job.status !== "running") return;
         job.status = "timed_out";
-        job.finishedAt = this.now();
-        publish(true);
       });
     }, timeoutMs);
     spawned.onExit((code, _signal, error) => {
@@ -117,6 +118,8 @@ export class JobTable {
       job.exitCode = code;
       job.finishedAt = job.finishedAt ?? this.now();
       publish(true);
+      job.finalized = true;
+      onChange?.(this.view(job));
     });
     this.jobs.set(job.jobId, job);
     return this.view(job);
@@ -129,10 +132,9 @@ export class JobTable {
   cancel(jobId: string): JobView {
     const job = this.take(jobId);
     if (job.status === "running") {
-      job.kill();
       if (job.timer) clearTimeout(job.timer);
       job.status = "cancelled";
-      job.finishedAt = this.now();
+      job.kill();
     }
     return this.view(job);
   }
@@ -147,7 +149,7 @@ export class JobTable {
       offset: start,
       nextOffset: end,
       output: text.slice(start, end),
-      done: job.status !== "running" && end === text.length,
+      done: job.finalized && end === text.length,
       exitCode: job.exitCode,
       status: job.status,
       truncated: job.truncated,
@@ -157,7 +159,7 @@ export class JobTable {
   killAll(): void {
     for (const job of this.jobs.values()) {
       if (job.timer) clearTimeout(job.timer);
-      if (job.status === "running") job.kill();
+      if (!job.finalized && job.status === "running") job.kill();
     }
   }
 
@@ -187,7 +189,7 @@ export class JobTable {
   private evict(): void {
     if (this.jobs.size < this.maxJobs) return;
     const finished = [...this.jobs.values()]
-      .filter((job) => job.status !== "running")
+      .filter((job) => job.finalized)
       .sort((a, b) => (a.finishedAt ?? a.startedAt) - (b.finishedAt ?? b.startedAt));
     const oldest = finished[0];
     if (oldest) this.jobs.delete(oldest.jobId);
