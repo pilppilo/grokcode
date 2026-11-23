@@ -5,7 +5,7 @@ export const SHELL_SERVER_VERSION = "0.1.0";
 
 export const SHELL_INSTRUCTIONS = [
   "grokcode-shell runs commands and edits files on the owner's own PCs.",
-  "Call list_machines first. Pass machine on every later tool when more than one PC is online.",
+  "Call list_machines first to discover reachable machines, their configured projects, and allowed roots. Specify a project to resolve relative file paths within its root. Pass machine when more than one PC is online.",
   "get_machine_info reports the OS, the shell (pwsh on Windows, bash on Linux), and the allowed roots.",
   "run_command takes argv (the program plus arguments) and an absolute cwd inside those roots. It does not invoke a shell unless shell is true and that machine's policy sets allowShell, which means an arbitrary shell.",
   "Commands are deny-by-default. A command must match the per-machine allowlist, and a hard deny list blocks privilege escalation, recursive deletes of a drive root, and argument-based code execution such as git -c.",
@@ -32,7 +32,62 @@ export interface ShellTool {
   annotations: ToolAnnotations;
 }
 
+const project = { type: "string", description: "Project name from list_machines." };
+const taskId = { type: "string", description: "Task ID returned by run_task." };
 const tools: ShellTool[] = [
+  {
+    name: "run_task",
+    description: "Start a project command configured in local policy and return its task ID. Defaults to the test command.",
+    op: "shell_run_task",
+    annotations: mutating,
+    inputSchema: {
+      type: "object", properties: { machine, project, task: { type: "string", description: "Configured task name. Defaults to test." } },
+      required: ["project"], additionalProperties: false,
+    },
+  },
+  {
+    name: "get_task_status",
+    description: "Get task phase and exit code.",
+    op: "shell_task_status",
+    annotations: readOnly,
+    inputSchema: { type: "object", properties: { machine, taskId }, required: ["taskId"], additionalProperties: false },
+  },
+  {
+    name: "get_task_activity",
+    description: "Read the task's retained output tail. Poll until done.",
+    op: "shell_task_activity",
+    annotations: readOnly,
+    inputSchema: {
+      type: "object", properties: { machine, taskId, offset: { type: "integer", minimum: 0 } },
+      required: ["taskId"], additionalProperties: false,
+    },
+  },
+  {
+    name: "cancel_task",
+    description: "Request task cancellation. Poll activity until the final output is available.",
+    op: "shell_cancel_task",
+    annotations: mutating,
+    inputSchema: { type: "object", properties: { machine, taskId }, required: ["taskId"], additionalProperties: false },
+  },
+  {
+    name: "check_repo",
+    description: "Show local branch, working-tree changes, upstream divergence, and recent commits.",
+    op: "shell_check_repo",
+    annotations: readOnly,
+    inputSchema: { type: "object", properties: { machine, project }, required: ["project"], additionalProperties: false },
+  },
+  {
+    name: "run_tests",
+    description: "Run the project policy's configured test command. Poll the returned job ID if the tests are still running.",
+    op: "shell_run_tests",
+    annotations: mutating,
+    inputSchema: {
+      type: "object",
+      properties: { machine, project, filter: { type: "string", description: "One positional test filter." } },
+      required: ["project"],
+      additionalProperties: false,
+    },
+  },
   {
     name: "list_machines",
     description: "List connected PCs with OS and allowed roots when available. Read-only.",
@@ -280,7 +335,16 @@ const tools: ShellTool[] = [
   },
 ];
 
+const projectFileTools = new Set(["run_command", "read_file", "list_dir", "write_file", "search_files", "apply_patch", "git_status", "git_diff", "git_log", "git_commit_push"]);
+
 export const SHELL_TOOLS: ShellTool[] = tools.map((tool) => {
   const title = tool.name.replaceAll("_", " ").replace(/^./, (first) => first.toUpperCase());
-  return { ...tool, annotations: { ...tool.annotations, title } };
+  const inputSchema = projectFileTools.has(tool.name) ? {
+    ...tool.inputSchema,
+    properties: {
+      ...tool.inputSchema.properties as Record<string, unknown>,
+      project: { type: "string", description: "Named project. A path or cwd can be relative to its root." },
+    },
+  } : tool.inputSchema;
+  return { ...tool, inputSchema, annotations: { ...tool.annotations, title } };
 });

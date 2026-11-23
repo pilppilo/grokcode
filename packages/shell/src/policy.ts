@@ -26,9 +26,17 @@ export interface PolicyLimits {
   maxReadBytes: number;
 }
 
+export interface Project {
+  root: string;
+  testCommand?: string[];
+  taskCommands?: Record<string, string[]>;
+  defaultBranch?: string;
+}
+
 export interface Policy {
   version: 1;
   roots: string[];
+  projects?: Record<string, Project>;
   allowShell: boolean;
   allowInterpreters: boolean;
   allow: AllowRule[];
@@ -51,6 +59,7 @@ export interface LoadedPolicy {
 const KNOWN_KEYS = new Set([
   "version",
   "roots",
+  "projects",
   "allowShell",
   "allowInterpreters",
   "allow",
@@ -170,6 +179,7 @@ export function parsePolicy(text: string, platform: PathPlatform, home: string):
     if (typeof root !== "string" || root.trim() === "") throw new ToolError("each policy root must be a string.", "invalid_policy");
     return expandRoot(root, platform, home);
   });
+  const projects = parseProjects(raw.projects, roots, platform, home);
   const allow = parseAllow(raw.allow);
   const git = parseGit(raw.git);
   const limitsIn = isRecord(raw.limits) ? raw.limits : {};
@@ -194,12 +204,56 @@ export function parsePolicy(text: string, platform: PathPlatform, home: string):
   return {
     version: 1,
     roots,
+    ...(projects ? { projects } : {}),
     allowShell: raw.allowShell === true,
     allowInterpreters: raw.allowInterpreters === true,
     allow,
     git,
     limits,
   };
+}
+
+function parseProjects(value: unknown, roots: string[], platform: PathPlatform, home: string) {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new ToolError("policy projects must be an object.", "invalid_policy");
+  const projects: Record<string, Project> = Object.create(null);
+  for (const [name, entry] of Object.entries(value)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(name) || !isRecord(entry) || typeof entry.root !== "string") {
+      throw new ToolError(`Invalid project "${name}". Each project needs a name and root.`, "invalid_policy");
+    }
+    const root = expandRoot(entry.root, platform, home);
+    if (!withinRoots(root, roots, platform) || isSensitivePath(root, platform)) {
+      throw new ToolError(`Project "${name}" must be inside an allowed root.`, "invalid_policy");
+    }
+    const { testCommand, defaultBranch } = entry;
+    if (testCommand !== undefined && (!Array.isArray(testCommand) || !testCommand.length ||
+        !testCommand.every((arg) => typeof arg === "string" && !arg.includes("\0")) ||
+        !isBareCommandName(testCommand[0]))) {
+      throw new ToolError(`Project "${name}" testCommand must be an argv array.`, "invalid_policy");
+    }
+    const taskCommands: Record<string, string[]> = Object.create(null);
+    if (entry.taskCommands !== undefined) {
+      if (!isRecord(entry.taskCommands)) throw new ToolError("taskCommands must be an object.", "invalid_policy");
+      for (const [task, argv] of Object.entries(entry.taskCommands)) {
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(task) || task === "test" ||
+            !Array.isArray(argv) || !argv.every((arg) => typeof arg === "string" && !arg.includes("\0")) ||
+            !isBareCommandName(argv[0])) {
+          throw new ToolError(`Invalid task command "${task}" for project "${name}".`, "invalid_policy");
+        }
+        taskCommands[task] = argv;
+      }
+    }
+    if (defaultBranch !== undefined && (typeof defaultBranch !== "string" || !defaultBranch.trim())) {
+      throw new ToolError(`Project "${name}" defaultBranch must be a non-empty string.`, "invalid_policy");
+    }
+    projects[name] = {
+      root,
+      ...(entry.taskCommands === undefined ? {} : { taskCommands }),
+      ...(testCommand === undefined ? {} : { testCommand }),
+      ...(defaultBranch === undefined ? {} : { defaultBranch }),
+    };
+  }
+  return projects;
 }
 
 function numberOr(value: unknown, fallback: number): number {
@@ -404,6 +458,7 @@ function hardDeny(argv: readonly string[], platform: PathPlatform): string | nul
   }
   const name = argv[0] ?? "";
   if (!isBareCommandName(name)) return "command must be a bare name with no path";
+  if (/^agy(?:\.exe|\.cmd|\.bat|\.com|\.ps1)?$/i.test(name)) return "Antigravity is denied";
   if (/\.(?:cmd|bat|com)$/i.test(name)) return "Windows script shims (.cmd, .bat, .com) are denied";
   const base = commandBase(name, platform);
   if (!base) return "command is empty";

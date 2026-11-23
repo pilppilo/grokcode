@@ -196,7 +196,7 @@ From a checkout you already have:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy\install-windows.ps1 -MachineName desktop -RelayUrl "wss://YOUR_WORKER.workers.dev/agent" -MachineToken "PASTE_TOKEN" -DefaultModel "opencode-go/deepseek-v4.1-flash" -SetOpenCodeModel
 ```
 
-The task runs `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File %USERPROFILE%\.config\grokcode\start-agent.ps1` at logon. The launcher loads `agent.env`, puts Node and npm on `PATH`, and loops: it logs a timestamped `starting agent` line, runs `node dist\cli.js` with hidden stdout and stderr logs, then waits 10 seconds after the process exits. Task Scheduler also restarts the launcher up to 10 times, a minute apart, with no execution time limit. Re-running the installer replaces the task. Logs (`agent.log`, `agent-out.log`, `agent-err.log`) rotate at 1 MB. `-NoStart` registers the task without starting it. Add `-Listen 127.0.0.1:8788 -McpToken "..."` for direct mode, with or without the relay.
+At logon and on task restart, Windows Script Host starts the PowerShell supervisor without opening a terminal window. The launcher loads `agent.env`, puts Node and npm on `PATH`, and loops: it logs a timestamped `starting agent` line, runs `node dist\cli.js` with hidden stdout and stderr logs, then waits 10 seconds after the process exits. Task Scheduler also restarts the launcher up to 10 times, a minute apart, with no execution time limit. Re-running the installer replaces the task. Logs (`agent.log`, `agent-out.log`, `agent-err.log`) rotate at 1 MB. `-NoStart` registers the task without starting it. Add `-Listen 127.0.0.1:8788 -McpToken "..."` for direct mode, with or without the relay.
 
 ### Linux
 
@@ -334,3 +334,9 @@ deploy/                systemd, launchd, Windows task and launcher, per-OS insta
 * The agent does not subscribe to `/api/event`. Permission waits are discovered by polling.
 * v1 command and question routes follow the published v1 server doc and may differ on very old builds.
 * Live `opencode serve` was not executed in CI. The HTTP client is tested against fixtures shaped like the current v2 and v1 responses.
+
+### Background tasks
+
+Call `run_task` with a project and an optional task name. It defaults to the project's `testCommand`. Additional named commands such as builds and linters can be configured as argv arrays under the project's `taskCommands` map. Commands still have to pass the machine policy. The caller selects a name and the agent uses the configured arguments.
+
+Keep the returned `task_` ID and use `get_task_status`, `get_task_activity`, or `cancel_task` on the same machine. Activity includes the bounded, redacted output tail after the child exits. The full output is stored on the machine in the agent config directory under `shell-tasks`. Raw logs can contain secrets. The MCP response exposes only the redacted tail and the full log byte count. Completed tasks can be read after the agent restarts. The files-touched list records up to 256 paths observed changing within the project while the task ran, including changes from other processes. Tasks that were active during an agent restart are reported as interrupted.
