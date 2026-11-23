@@ -152,7 +152,7 @@ Copy-Item "$env:USERPROFILE\.config\grokcode\policy.example.json" "$env:USERPROF
 
 `allowShell` defaults to false. Setting `allowShell` to true means an arbitrary shell: the command string is passed to `pwsh -NoProfile -NonInteractive -Command` on Windows and `bash --noprofile --norc -c` on Linux, with shell interpretation. Pipe-to-shell (`curl | sh`, `irm | iex`) is still denied. Leave it false unless you accept that.
 
-`git.branches` gates `git_commit_push`. `git.push` must be true before any push, including `run_command`. The only accepted push is `origin` plus `HEAD:<allowlisted branch>`. A leading `+`, `--force`, and remote-helper URLs such as `ext::` are denied. Paths are the ones you name. There is no `git add -A`. `git_status` runs only when `status` is allowlisted.
+`git.branches` gates `git_commit_push`. `git.push` must be true before any push, including `run_command`. `git_commit_push` with `push` true checks `git.push` before `git add` or `git commit`. When push is disabled, that call returns `push_denied` and leaves the index and HEAD unchanged. A successful commit result includes the commit SHA. If the commit succeeds and the push itself fails, the tool result has `isError: true` and still includes the commit SHA plus the push error. The message says the commit already exists and that only the push should be retried. The only accepted push is `origin` plus `HEAD:<allowlisted branch>`. A leading `+`, `--force`, and remote-helper URLs such as `ext::` are denied. Paths are the ones you name. There is no `git add -A`. `git_status` runs only when `status` is allowlisted.
 
 Every git spawn, including `git_status`, `git_diff`, `git_log`, `git_commit_push`, and `run_command` git, adds `-c core.fsmonitor=`, `-c core.hooksPath=NUL` (Windows) or `/dev/null` (Linux), `-c protocol.ext.allow=never`, `-c core.sshCommand=`, `-c core.pager=cat`, `-c diff.external=`, and `HUSKY=0`. `git add` also clears clean, smudge, and process filters. `rg` accepts only a fixed flag set (`-F`, `-n`, `-i`, `-w`, `-l`, context and max-count flags). `--hidden`, `--no-ignore`, `-u`, and `--glob` are denied. `git show HEAD:.env` and any object spec whose path is sensitive is denied.
 
@@ -235,4 +235,4 @@ Every tool takes `machine` except `list_machines`, which is required when more t
 | `git_diff` / `git_log` | Unstaged changes by default, staged changes on request, and recent commit history. Read-only. |
 | `kill_job` | Cancel a running command on the selected machine. Destructive. |
 | `write_file` / `apply_patch` | Inside the roots. Unified diffs. Destructive. |
-| `git_commit_push` | Named paths, branch allowlist, push only if `git.push` is true. Destructive. |
+| `git_commit_push` | Named paths and a branch allowlist. Push is refused before any commit when `git.push` is false. A push failure after a commit returns the commit SHA and the push error, with `isError` set, and says to retry only the push. Destructive. |

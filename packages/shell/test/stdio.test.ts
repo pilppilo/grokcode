@@ -29,12 +29,16 @@ test("the stdio server lists shell tools and defaults the machine", async () => 
   });
   const backend = localBackend("my-pc", runtime);
   const listed = (await handleStdioMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, backend)) as {
-    result: { tools: Array<{ name: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }> };
+    result: { tools: Array<{ name: string; description?: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }> };
   };
   const run = listed.result.tools.find((tool) => tool.name === "run_command");
   const machines = listed.result.tools.find((tool) => tool.name === "list_machines");
+  const commit = listed.result.tools.find((tool) => tool.name === "git_commit_push");
   assert.equal(run?.annotations?.destructiveHint, true);
   assert.equal(machines?.annotations?.readOnlyHint, true);
+  assert.match(commit?.description ?? "", /before anything is staged or committed/);
+  assert.match(commit?.description ?? "", /commit SHA/);
+  assert.match(commit?.description ?? "", /retry only the push/i);
   const info = (await handleStdioMessage(
     { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_machine_info", arguments: {} } },
     backend,
