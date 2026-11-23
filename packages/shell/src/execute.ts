@@ -152,7 +152,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         if (!argv || !Array.isArray(argv)) throw new ToolError(`This project has no configured ${command} command.`, "invalid_argument");
         return tasks.start(name, command, (publish, capture) => startCommand(
           { cwd: root, argv }, ctx, jobs, spawnImpl, true, publish, capture,
-        ));
+        ), root);
       }
       if (op === "shell_run_tests") {
         if (!project.testCommand) throw new ToolError("This project has no configured test command.", "invalid_argument");

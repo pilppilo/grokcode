@@ -1,15 +1,18 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, statSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import path from "node:path";
 
 import { ToolError } from "grokcode-shared";
 
+import { isSensitivePath } from "./confine.js";
 import type { JobTable, JobView } from "./jobs.js";
 
 interface StoredTask {
   project: string;
   command: string;
   logIncomplete?: boolean;
+  filesTouched?: string[];
+  filesTouchedIncomplete?: boolean;
   job?: Pick<JobView, "status" | "exitCode" | "finishedAt" | "output" | "truncated">;
 }
 
@@ -19,7 +22,7 @@ export class TaskStore {
 
   constructor(private readonly directory: string, private readonly jobs: JobTable) {}
 
-  async start(project: string, command: string, launch: (publish: (job: JobView) => void, capture: (chunk: Buffer | string) => void) => Promise<JobView>) {
+  async start(project: string, command: string, launch: (publish: (job: JobView) => void, capture: (chunk: Buffer | string) => void) => Promise<JobView>, root?: string) {
     const taskId = `task_${randomBytes(12).toString("hex")}`;
     this.save(taskId, { project, command });
     const log = this.file(taskId, "log");
@@ -32,10 +35,29 @@ export class TaskStore {
         logIncomplete = true;
       }
     };
+    const changed = new Set<string>();
+    let watchIncomplete = false;
+    let watcher: FSWatcher | undefined;
+    if (root) {
+      try {
+        watcher = watch(root, { recursive: true, persistent: false }, (_event, file) => {
+          if (!file) { watchIncomplete = true; return; }
+          const relative = path.relative(root, path.resolve(root, file));
+          if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return;
+          if (isSensitivePath(path.join(root, relative), process.platform === "win32" ? "win32" : "posix")) return;
+          if (changed.size < 256) changed.add(relative);
+          else if (!changed.has(relative)) watchIncomplete = true;
+        });
+        watcher.on("error", () => { watchIncomplete = true; });
+      } catch {
+        watchIncomplete = true;
+      }
+    }
     const finish = (job: JobView) => {
+      watcher?.close();
       this.active.delete(taskId);
       const { status, exitCode, finishedAt, output, truncated } = job;
-      const stored = { project, command, logIncomplete, job: { status, exitCode, ...(finishedAt === undefined ? {} : { finishedAt }), output, truncated } };
+      const stored = { project, command, logIncomplete, filesTouched: [...changed].sort(), filesTouchedIncomplete: watchIncomplete, job: { status, exitCode, ...(finishedAt === undefined ? {} : { finishedAt }), output, truncated } };
       try {
         this.save(taskId, stored);
       } catch {
@@ -46,6 +68,7 @@ export class TaskStore {
     try {
       job = await launch(finish, capture);
     } catch (error) {
+      watcher?.close();
       try { rmSync(this.file(taskId), { force: true }); } catch { /* preserve the launch error */ }
       throw error;
     }
@@ -54,14 +77,15 @@ export class TaskStore {
   }
 
   status(taskId: string) {
-    const { project, command, job, live } = this.lookup(taskId);
+    const { project, command, job, live, filesTouched, filesTouchedIncomplete } = this.lookup(taskId);
     const phase = job && (live || job.finishedAt !== undefined) ? job.status : "interrupted";
     return {
       taskId, project, phase,
       done: !live,
       exitCode: job?.exitCode ?? null,
       steps: [{ name: command, phase }],
-      filesTouched: null,
+      filesTouched: filesTouched ?? null,
+      filesTouchedIncomplete: filesTouchedIncomplete ?? (job?.finishedAt === undefined),
     };
   }
 
