@@ -59,7 +59,7 @@ export class JobTable {
     private readonly maxJobs = 32,
   ) {}
 
-  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void): JobView {
+  start(spec: SpawnSpec, timeoutMs: number, maxOutput: number, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void, onOutput?: (chunk: Buffer | string) => void): JobView {
     this.evict();
     const running = [...this.jobs.values()].filter((job) => !job.finalized).length;
     if (running >= 8) throw new ToolError("too many commands are already running on this machine.", "busy");
@@ -84,9 +84,10 @@ export class JobTable {
       const raw = keepTail && job.truncated ? job.raw.slice(job.raw.includes("\n") ? job.raw.indexOf("\n") + 1 : job.raw.length) : job.raw;
       job.output = redact(visibleRaw(raw, done));
     };
-    const push = (chunk: string) => {
+    const push = (chunk: Buffer | string) => {
+      onOutput?.(chunk);
       if (job.truncated && !keepTail) return;
-      job.raw += chunk;
+      job.raw += String(chunk);
       if (Buffer.byteLength(job.raw) > maxOutput) {
         if (keepTail) {
           const bytes = Buffer.from(job.raw);
@@ -100,8 +101,8 @@ export class JobTable {
       }
       publish(false);
     };
-    spawned.stdout?.on("data", (chunk: string) => push(String(chunk)));
-    spawned.stderr?.on("data", (chunk: string) => push(String(chunk)));
+    spawned.stdout?.on("data", (chunk: Buffer | string) => push(chunk));
+    spawned.stderr?.on("data", (chunk: Buffer | string) => push(chunk));
     job.timer = setTimeout(() => {
       if (job.status !== "running") return;
       job.timedOut = true;

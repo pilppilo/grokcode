@@ -150,8 +150,8 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         const command = record.task === undefined ? "test" : requiredString(record.task, "task", 64);
         const argv = command === "test" ? project.testCommand : project.taskCommands?.[command];
         if (!argv || !Array.isArray(argv)) throw new ToolError(`This project has no configured ${command} command.`, "invalid_argument");
-        return tasks.start(name, command, (publish) => startCommand(
-          { cwd: root, argv }, ctx, jobs, spawnImpl, true, publish,
+        return tasks.start(name, command, (publish, capture) => startCommand(
+          { cwd: root, argv }, ctx, jobs, spawnImpl, true, publish, capture,
         ));
       }
       if (op === "shell_run_tests") {
@@ -275,7 +275,7 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
   };
 }
 
-async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void) {
+async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void, onOutput?: (chunk: Buffer | string) => void) {
   const shell = record.shell === true;
   const cwd = confineCwd(requiredString(record.cwd, "cwd", 4096), ctx);
   const timeoutMs = Math.min(
@@ -290,7 +290,7 @@ async function startCommand(record: Record<string, unknown>, ctx: FileContext, j
       { argv: [], command, cwd, platform: ctx.platform, shell: true },
       timeoutMs,
       ctx.policy.limits.maxOutputBytes,
-      spawnImpl, keepTail, onChange,
+      spawnImpl, keepTail, onChange, onOutput,
     );
   }
   const argv = stringArray(record.argv, "argv");
@@ -304,14 +304,14 @@ async function startCommand(record: Record<string, unknown>, ctx: FileContext, j
       { argv: wrapped.argv, cwd, platform: ctx.platform, shell: false, env: wrapped.env, roots: ctx.policy.roots },
       timeoutMs,
       ctx.policy.limits.maxOutputBytes,
-      spawnImpl, keepTail, onChange,
+      spawnImpl, keepTail, onChange, onOutput,
     );
   }
   return jobs.start(
     { argv, cwd, platform: ctx.platform, shell: false, roots: ctx.policy.roots },
     timeoutMs,
     ctx.policy.limits.maxOutputBytes,
-    spawnImpl, keepTail, onChange,
+    spawnImpl, keepTail, onChange, onOutput,
   );
 }
 
