@@ -98,12 +98,10 @@ async function handleGemini(request: Request, options: RelayHttpOptions): Promis
     return handleMcpRequest(request, geminiMcpOptions(options));
   }
   const presented = bearerToken(request.headers.get("authorization"));
-  const staticOk = clientAuthorized(options.mcpToken, presented);
-  let oauthOk = false;
-  if (!staticOk && presented && options.oauth) {
-    oauthOk = (await accessTokenSubject(presented, options.oauth, request)) != null;
-  }
-  if (!staticOk && !oauthOk) {
+  const subject = presented && options.oauth
+    ? await accessTokenSubject(presented, options.oauth, request)
+    : null;
+  if (!subject) {
     const error = presented ? "invalid_token" : "invalid_request";
     return new Response("unauthorized\n", {
       status: 401,

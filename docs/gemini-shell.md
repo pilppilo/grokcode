@@ -5,7 +5,6 @@ This is the shell and file bridge for the Gemini app (custom apps / Connected Ap
 ```text
 Gemini app  --OAuth 2.1 + HTTPS-->  Worker /gemini/mcp  --WebSocket-->  grokcode-agent  --policy-->  pwsh or bash
 agy         --stdio-->  grokcode-shell  --policy-->  local files and programs
-agy         --Streamable HTTP + bearer-->  Worker /gemini/mcp  --WebSocket-->  grokcode-agent
 ```
 
 Command output crosses Google and Cloudflare when you use the remote endpoint. Keep the agent on a normal user account, and keep `policy.json` outside the directories the tools are allowed to touch.
@@ -18,13 +17,12 @@ No real token belongs in git. The relay worker deploys from GitHub Actions when 
 | --- | --- | --- |
 | `/mcp` | Grok Bot and other bearer clients | `Authorization: Bearer <MCP_TOKEN>` |
 | `/gemini/mcp` | Gemini custom apps | OAuth 2.1 access token |
-| `/gemini/mcp` | Antigravity remote | The same `MCP_TOKEN` bearer header |
 | `/oauth/authorize`, `/oauth/token`, `/oauth/register` | Gemini's OAuth client | Public discovery |
 | `/.well-known/oauth-authorization-server` | Gemini | Public |
 | `/.well-known/oauth-protected-resource` and `.../gemini/mcp` | Gemini | Public |
 | `/agent` | Each PC | Per-machine token, unchanged |
 
-`@cloudflare/workers-oauth-provider` owns the worker entrypoint and treats its API route as OAuth-only. That would reject Antigravity's static bearer and wrap `/mcp` and `/agent`. The worker therefore implements the OAuth 2.1 surface itself: RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. A refresh token is stable: every refresh returns that same token. It expires 90 days after it was created, and a refresh does not move that deadline. Access tokens last one hour and are bound to `https://<origin>/gemini/mcp`. Clients can revoke tokens at `/oauth/revoke`. Dynamic registration is capped (50 clients unless the process is restarted with a fresh store).
+The worker implements OAuth 2.1 for the Gemini endpoint, including RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. A refresh token is stable: every refresh returns that same token. It expires 90 days after it was created, and a refresh does not move that deadline. Access tokens last one hour and are bound to `https://<origin>/gemini/mcp`. Clients can revoke tokens at `/oauth/revoke`. Dynamic registration is capped (50 clients unless the process is restarted with a fresh store).
 
 Without pins, Gemini can register the six official Connected Apps callbacks: `https` on `oauth-redirect.googleusercontent.com`, `oauth-redirect-sandbox.googleusercontent.com`, and `oauth-redirect-test.googleusercontent.com`, each under `/r/` or `/a/`, with no port. Other paths, ports, schemes, and hosts are rejected, including loopback. Configure `OAUTH_PINNED_REDIRECTS` to require exact callbacks, including for loopback development clients. Set `PUBLIC_ORIGIN` to the origin clients use when the worker's request host is not that URL (a custom domain, or a proxy in front of `*.workers.dev`).
 
@@ -175,7 +173,7 @@ Requirements on the Google account: a personal account, Gemini Apps Activity on,
 
 Gemini snapshots the tool list. Adding or renaming tools later can break a saved app. Keep this endpoint stable, or put a new shape on a new path.
 
-There is no static `Authorization` header field in the custom-app dialog. That is why OAuth is required for Gemini and why the bearer token remains available for Antigravity on the same URL.
+Use OAuth for the Gemini custom app. For Antigravity, use the local stdio configuration below.
 
 ## Antigravity CLI
 
@@ -199,19 +197,6 @@ node packages/shell/dist/cli.js --policy ~/.config/grokcode/policy.json --name m
         "GROKCODE_SHELL_POLICY": "C:\\Users\\you\\.config\\grokcode\\policy.json",
         "GROKCODE_MACHINE_NAME": "my-pc"
       }
-    }
-  }
-}
-```
-
-Remote, same tools, using the relay bearer token:
-
-```json
-{
-  "mcpServers": {
-    "grokcode-shell-remote": {
-      "serverUrl": "https://<worker>.<your-subdomain>.workers.dev/gemini/mcp",
-      "headers": { "Authorization": "Bearer <MCP_TOKEN>" }
     }
   }
 }

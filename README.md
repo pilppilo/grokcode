@@ -303,7 +303,7 @@ Both modes at once are allowed. The relay does not read the direct listener, and
 
 ## Gemini and Antigravity
 
-`/mcp` is unchanged: bearer token, OpenCode tools. Gemini custom apps cannot send that header, so the worker also serves `/gemini/mcp` with OAuth 2.1 (discovery, PKCE, dynamic client registration) limited to the owner email in `OWNER_EMAILS`, or a one-time approval secret. Antigravity can use the same URL with the existing `MCP_TOKEN`, or run `grokcode-shell` over stdio. Commands and file edits are deny-by-default until `~/.config/grokcode/policy.json` exists on that PC. The full deploy and connect steps are in [docs/gemini-shell.md](docs/gemini-shell.md).
+`/mcp` serves OpenCode tools and accepts the static `MCP_TOKEN`. The worker serves shell tools at `/gemini/mcp`, which requires an OAuth 2.1 access token obtained through owner email verification or the approval secret. Antigravity can connect to `grokcode-shell` over local stdio. Commands and file edits are deny-by-default until `~/.config/grokcode/policy.json` exists on that PC. The full deploy and connect steps are in [docs/gemini-shell.md](docs/gemini-shell.md).
 
 ## Develop
 
