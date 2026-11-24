@@ -21,13 +21,6 @@
         "git_status",
         "git_commit_push"
       ]
-    },
-    "grokcode-shell-remote": {
-      "serverUrl": "https://YOUR_WORKER.workers.dev/gemini/mcp",
-      "headers": {
-        "Authorization": "Bearer PASTE_MCP_TOKEN"
-      },
-      "disabledTools": []
     }
   }
 }

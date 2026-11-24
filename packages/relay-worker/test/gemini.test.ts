@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleRelayRequest, type HubBridge } from "../src/http.ts";
-import { MemoryOAuthStore, handleOAuthRequest, pkceS256, type OAuthConfig } from "../src/oauth.ts";
+import { MemoryOAuthStore, handleOAuthRequest, pkceS256, sha256, type OAuthConfig } from "../src/oauth.ts";
 
 const MCP = "mcp-client-token-0123456789";
 const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -32,19 +32,33 @@ function oauth(): OAuthConfig {
   };
 }
 
-test("gemini mcp is a separate tool list and accepts the static bearer", async () => {
+async function authenticatedShell() {
+  const config = oauth();
+  const token = "test-shell-access-token-0123456789";
+  await config.store.put(`access:${sha256(token)}`, JSON.stringify({
+    clientId: "test-client",
+    email: "ada@example.com",
+    scope: "shell",
+    resource: "https://relay.example/gemini/mcp",
+    expiresAt: Date.now() + 60_000,
+  }));
+  return { config, token };
+}
+
+test("gemini mcp lists shell tools and forwards calls with OAuth", async () => {
   const hub = bridge();
+  const { config, token } = await authenticatedShell();
   const listed = await handleRelayRequest(
     new Request("https://relay.example/gemini/mcp", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${MCP}`,
+        authorization: `Bearer ${token}`,
         "content-type": "application/json",
         accept: "application/json",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     }),
-    { mcpToken: MCP, bridge: hub, oauth: oauth() },
+    { mcpToken: MCP, bridge: hub, oauth: config },
   );
   const body = (await listed.json()) as {
     result: { serverInfo?: { name: string }; tools: Array<{ name: string; annotations?: { destructiveHint?: boolean; readOnlyHint?: boolean } }> };
@@ -60,7 +74,7 @@ test("gemini mcp is a separate tool list and accepts the static bearer", async (
     new Request("https://relay.example/gemini/mcp", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${MCP}`,
+        authorization: `Bearer ${token}`,
         "content-type": "application/json",
         accept: "application/json",
       },
@@ -71,7 +85,7 @@ test("gemini mcp is a separate tool list and accepts the static bearer", async (
         params: { name: "run_command", arguments: { machine: "my-pc", argv: ["git", "status"], cwd: "C:\\src" } },
       }),
     }),
-    { mcpToken: MCP, bridge: hub, oauth: oauth() },
+    { mcpToken: MCP, bridge: hub, oauth: config },
   );
   assert.equal(called.status, 200);
   assert.deepEqual(hub.calls[0], {
@@ -198,6 +212,7 @@ test("an oauth access token can call the shell endpoint and the original /mcp st
 });
 
 test("gemini surfaces a push failure as an error that still contains the commit SHA", async () => {
+  const { config, token } = await authenticatedShell();
   const sha = "abc123def456abc123def456abc123def456abcd";
   let mode: "clean" | "local" | "failed" | "fallback" = "clean";
   const hub: HubBridge = {
@@ -232,7 +247,7 @@ test("gemini surfaces a push failure as an error that still contains the commit 
       new Request("https://relay.example/gemini/mcp", {
         method: "POST",
         headers: {
-          authorization: `Bearer ${MCP}`,
+          authorization: `Bearer ${token}`,
           "content-type": "application/json",
           accept: "application/json",
         },
@@ -246,7 +261,7 @@ test("gemini surfaces a push failure as an error that still contains the commit 
           },
         }),
       }),
-      { mcpToken: MCP, bridge: hub, oauth: oauth() },
+      { mcpToken: MCP, bridge: hub, oauth: config },
     );
     const body = (await response.json()) as { result: { isError: boolean; content: { text: string }[] } };
     return { isError: body.result.isError, json: JSON.parse(body.result.content[0]!.text) as Record<string, unknown> };

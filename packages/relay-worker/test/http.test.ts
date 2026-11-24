@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleRelayRequest, type HubBridge } from "../src/http.ts";
+import { MemoryOAuthStore, sha256, type OAuthConfig } from "../src/oauth.ts";
 
 const MCP = "mcp-client-token-0123456789";
 
@@ -17,8 +18,8 @@ function bridge(partial: Partial<HubBridge> = {}): HubBridge & { calls: unknown[
   };
 }
 
-function mcp(method: string, token?: string, body?: unknown) {
-  return new Request("https://relay.example/mcp", {
+function mcp(method: string, token?: string, body?: unknown, path = "/mcp") {
+  return new Request(`https://relay.example${path}`, {
     method,
     headers: {
       "content-type": "application/json",
@@ -76,4 +77,37 @@ test("an authorized tools/call is proxied to the named machine", async () => {
   assert.equal(body.result.isError, false);
   assert.match(body.result.content[0]!.text, /healthy/);
   assert.deepEqual(hub.calls, [{ machine: "laptop", op: "server_info", params: {} }]);
+});
+
+test("Gemini requires a resource-bound OAuth token while OpenCode accepts MCP_TOKEN", async () => {
+  const now = Date.now();
+  const store = new MemoryOAuthStore(() => now);
+  const oauth: OAuthConfig = {
+    store,
+    ownerEmails: ["owner@example.com"],
+    publicOrigin: "https://relay.example",
+    now: () => now,
+  };
+  const token = "gemini-oauth-access-token-for-test";
+  await store.put(`access:${sha256(token)}`, JSON.stringify({
+    clientId: "gemini-client",
+    email: "owner@example.com",
+    scope: "shell",
+    resource: "https://relay.example/gemini/mcp",
+    expiresAt: now + 60_000,
+  }));
+  const options = { mcpToken: MCP, bridge: bridge(), oauth };
+  const request = { jsonrpc: "2.0", id: 1, method: "ping" };
+  const rejected = await handleRelayRequest(mcp("POST", MCP, request, "/gemini/mcp"), options);
+  assert.equal(rejected.status, 401);
+  const challenge = rejected.headers.get("www-authenticate") ?? "";
+  assert.match(challenge, /^Bearer /);
+  assert.match(challenge, /resource_metadata="https:\/\/relay\.example\/\.well-known\/oauth-protected-resource\/gemini\/mcp"/);
+  assert.match(challenge, /error="invalid_token"/);
+
+  const accepted = await handleRelayRequest(mcp("POST", token, request, "/gemini/mcp"), options);
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(await accepted.json(), { jsonrpc: "2.0", id: 1, result: {} });
+  assert.equal((await handleRelayRequest(mcp("POST", MCP, request), options)).status, 200);
+  assert.equal((await handleRelayRequest(mcp("POST", token, request), options)).status, 401);
 });
