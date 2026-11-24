@@ -34,7 +34,7 @@ export function confineFile(input: string, ctx: FileContext, cwd: string | undef
   });
 }
 
-export function readFile(input: string, ctx: FileContext, offset = 0, maxBytes?: number, lines?: { start: number; end?: number }): { path: string; content: string; bytes: number; nextOffset: number; truncated: boolean } {
+export function readFile(input: string, ctx: FileContext, offset = 0, maxBytes?: number, lines?: { start: number; end?: number }, sourceRedaction = true): { path: string; content: string; bytes: number; nextOffset: number; truncated: boolean } {
   const file = confineFile(input, ctx, undefined, false, true);
   const st = fs.lstatSync(file);
   if (st.isSymbolicLink() || !st.isFile()) throw new ToolError("path is not a regular file.", "invalid_path");
@@ -66,7 +66,7 @@ export function readFile(input: string, ctx: FileContext, offset = 0, maxBytes?:
       if (lead > 0 && read - lead < width) read = lead;
     }
     const sourceCode = /\.(?:[cm]?[jt]sx?|py|go|rs|sh|bash|zsh|fish|ps1|rb|php|java|kt|swift|c|h|cpp|cs|lua)$/i.test(file);
-    const content = redact(buffer.subarray(0, read).toString("utf8"), sourceCode);
+    const content = redact(buffer.subarray(0, read).toString("utf8"), sourceRedaction && sourceCode);
     return { path: file, content, bytes: read, nextOffset: start + read, truncated: start + read < end };
   } finally {
     fs.closeSync(fd);

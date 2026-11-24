@@ -7,6 +7,7 @@ export const SHELL_INSTRUCTIONS = [
   "grokcode-shell runs commands and edits files on the owner's own PCs.",
   "Call list_machines first to discover reachable machines, their configured projects, and allowed roots. Specify a project to resolve relative file paths within its root. Pass machine when more than one PC is online.",
   "get_machine_info reports the OS, the shell (pwsh on Windows, bash on Linux), and the allowed roots.",
+  "Call check_repo with a project and optional project-relative cwd to discover repository guidance. When a project tool reports a different guidance scope or fingerprint, call check_repo for that scope. Local policy and user authorization govern every tool call.",
   "run_command takes argv (the program plus arguments) and an absolute cwd inside those roots. It does not invoke a shell unless shell is true and that machine's policy sets allowShell, which means an arbitrary shell.",
   "Commands are deny-by-default. A command must match the per-machine allowlist, and a hard deny list blocks privilege escalation, recursive deletes of a drive root, and argument-based code execution such as git -c.",
   "wait defaults to true and blocks for up to about 20 seconds. Poll get_job or poll_output for running jobs, or use kill_job to cancel.",
@@ -71,10 +72,10 @@ const tools: ShellTool[] = [
   },
   {
     name: "check_repo",
-    description: "Show local branch, working-tree changes, upstream divergence, and recent commits.",
+    description: "Show the project Git summary and discover repository guidance for the optional project-relative cwd.",
     op: "shell_check_repo",
     annotations: readOnly,
-    inputSchema: { type: "object", properties: { machine, project }, required: ["project"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { machine, project, cwd: { type: "string", description: "Directory relative to the project root. Defaults to the root." } }, required: ["project"], additionalProperties: false },
   },
   {
     name: "run_tests",
