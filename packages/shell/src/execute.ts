@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { ToolError, asRecord, errorMessage, requiredString, type PathPlatform } from "grokcode-shared";
@@ -17,6 +17,7 @@ import {
 } from "./files.js";
 import { commandBase, pathApi, withinRoots } from "./confine.js";
 import { assertProjectRepo, checkRepo, gitCommit, gitInspect, gitStatus, wrapGitCommand } from "./git.js";
+import { guidanceNotice, projectGuidance } from "./guidance.js";
 import { searchFiles } from "./search.js";
 import { TaskStore } from "./tasks.js";
 import { JobTable, type JobView } from "./jobs.js";
@@ -144,15 +145,24 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
       if (op === "shell_run" && record.shell === true) {
         throw new ToolError("Project commands require argv.", "invalid_argument");
       }
-      if (op === "shell_check_repo") return checkRepo(root, ctx, spawnImpl);
+      if (op === "shell_check_repo") {
+        if (pathApi(ctx.platform).parse(target).root) {
+          throw new ToolError("check_repo cwd must be project-relative.", "invalid_path");
+        }
+        const cwd = confineCwd(record.cwd as string, ctx);
+        if (!lstatSync(cwd).isDirectory()) throw new ToolError("cwd is not a directory.", "invalid_path");
+        const summary = await checkRepo(root, ctx, spawnImpl);
+        return { ...summary, guidance: projectGuidance(root, cwd, ctx) };
+      }
       if (op === "shell_run_task") {
         if (!tasks) throw new ToolError("Task storage is unavailable.", "task_unavailable");
         const command = record.task === undefined ? "test" : requiredString(record.task, "task", 64);
         const argv = command === "test" ? project.testCommand : project.taskCommands?.[command];
         if (!argv || !Array.isArray(argv)) throw new ToolError(`This project has no configured ${command} command.`, "invalid_argument");
-        return tasks.start(name, command, (publish, capture) => startCommand(
+        const result = await tasks.start(name, command, (publish, capture) => startCommand(
           { cwd: root, argv }, ctx, jobs, spawnImpl, true, publish, capture,
         ), root);
+        return { ...result, guidance: guidanceNotice(root, root, ctx) };
       }
       if (op === "shell_run_tests") {
         if (!project.testCommand) throw new ToolError("This project has no configured test command.", "invalid_argument");
@@ -161,9 +171,20 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
           throw new ToolError("Invalid test filter.", "invalid_argument");
         }
         const argv = filter === undefined ? project.testCommand : [...project.testCommand, filter];
-        return startCommand({ cwd: root, argv }, ctx, jobs, spawnImpl, true);
+        const result = await startCommand({ cwd: root, argv }, ctx, jobs, spawnImpl, true);
+        return { ...result, guidance: guidanceNotice(root, root, ctx) };
       }
+      const cwd = field === "cwd" ? confineCwd(record.cwd as string, ctx) : undefined;
+      const result = asRecord(await dispatchShell(op, record, ctx));
+      const resultPath = result.path as string;
+      const scope = cwd ?? (op === "shell_list_dir" ? resultPath : pathApi(ctx.platform).dirname(resultPath));
+      return { ...result, guidance: guidanceNotice(root, scope, ctx) };
     }
+    return dispatchShell(op, record, ctx);
+  }
+
+  async function dispatchShell(op: string, record: Record<string, unknown>, ctx: FileContext): Promise<unknown> {
+    const { policy } = ctx;
     switch (op) {
       case "shell_run":
         return startCommand(record, ctx, jobs, spawnImpl);

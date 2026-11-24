@@ -80,6 +80,7 @@ export async function callShellTool(
     if (!wait) return started;
     const jobId = isRecord(started) && typeof started.jobId === "string" ? started.jobId : undefined;
     if (!jobId || (isRecord(started) && started.status !== "running")) return started;
+    const guidance = isRecord(started) && started.guidance !== undefined ? { guidance: started.guidance } : {};
     let last: unknown = started;
     while (clock.now() < deadline) {
       const remainingBeforePoll = deadline - clock.now();
@@ -93,9 +94,9 @@ export async function callShellTool(
       const status = isRecord(last) ? last.status : undefined;
       if (status && status !== "running") {
         if (name === "run_tests" && isRecord(last)) {
-          return { ...last, passed: status === "exited" && last.exitCode === 0 };
+          return { ...last, ...guidance, passed: status === "exited" && last.exitCode === 0 };
         }
-        return last;
+        return isRecord(last) ? { ...last, ...guidance } : last;
       }
       const remaining = deadline - clock.now();
       if (remaining <= 0) break;
@@ -104,6 +105,7 @@ export async function callShellTool(
     }
     return {
       ...(isRecord(last) ? last : {}),
+      ...guidance,
       status: "running",
       jobId,
       hint: "The sync budget ended before the command exited. Poll get_job or poll_output.",
