@@ -41,6 +41,9 @@ export interface AgentConfig {
 
 export const HELP = `grokcode-agent — connect a local OpenCode server to Grok Bot
 
+Audit summary (local log):
+  grokcode audit [--file <shell-audit.log>]
+
 Relay (default architecture, no inbound ports):
   grokcode-agent --name laptop --relay wss://YOUR_WORKER.workers.dev/agent
 

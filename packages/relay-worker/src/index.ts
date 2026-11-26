@@ -3,6 +3,7 @@ import { HubError, errorCode, errorMessage, type MachineInfo } from "grokcode-sh
 import { RelayHubDO } from "./durable.js";
 import type { Env } from "./env.js";
 import { handleRelayRequest } from "./http.js";
+import type { ApprovalAttempt } from "./oauth-approval.js";
 import { GEMINI_MCP_PATH, isOAuthPath, parseOwnerEmails, parseStaticClients, type OAuthConfig, type OAuthStore } from "./oauth.js";
 import { OAuthStoreDO } from "./oauth-do.js";
 
@@ -12,10 +13,11 @@ function stub(env: Env): DurableObjectStub {
   return env.HUB.get(env.HUB.idFromName("grokcode"));
 }
 
-async function bridgeCall(env: Env, machine: string, op: string, params: unknown, timeoutMs?: number): Promise<unknown> {
+async function bridgeCall(env: Env, machine: string, op: string, params: unknown, timeoutMs?: number, signal?: AbortSignal): Promise<unknown> {
   const response = await stub(env).fetch("https://hub.internal/call", {
     method: "POST",
     body: JSON.stringify({ machine, op, params, timeoutMs }),
+    ...(signal ? { signal } : {}),
   });
   const body = (await response.json()) as {
     ok?: boolean;
@@ -50,6 +52,23 @@ function oauthStore(env: Env): OAuthStore {
       const response = await store.fetch("https://oauth.internal/take", { method: "POST", body: JSON.stringify({ key }) });
       const body = (await response.json()) as { value?: string | null };
       return body.value ?? null;
+    },
+    async registerClient(key, value, expiresAt, quota) {
+      const response = await store.fetch("https://oauth.internal/register-client", {
+        method: "POST",
+        body: JSON.stringify({ key, value, expiresAt, quota }),
+      });
+      if (!response.ok) throw new Error("OAuth client storage failed.");
+      const body = (await response.json()) as { inserted: boolean };
+      return body.inserted;
+    },
+    async approveAttempt(key, matches) {
+      const response = await store.fetch("https://oauth.internal/approve-attempt", {
+        method: "POST",
+        body: JSON.stringify({ key, matches }),
+      });
+      if (!response.ok) throw new Error("OAuth approval storage failed.");
+      return await response.json() as ApprovalAttempt;
     },
   };
 }
@@ -102,10 +121,11 @@ export default {
       return await handleRelayRequest(request, {
         mcpToken: env.MCP_TOKEN,
         maxSyncWaitMs: env.MAX_SYNC_WAIT_MS ? Number(env.MAX_SYNC_WAIT_MS) : undefined,
+        enableCodeMode: env.ENABLE_CODE_MODE === "1",
         ...(oauth ? { oauth } : {}),
         bridge: {
           listMachines: machines,
-          call: (machine, op, params, timeoutMs) => bridgeCall(env, machine, op, params, timeoutMs),
+          call: (machine, op, params, timeoutMs, signal) => bridgeCall(env, machine, op, params, timeoutMs, signal),
         },
       });
     } catch (err) {

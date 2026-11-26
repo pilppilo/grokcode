@@ -23,6 +23,8 @@ export {
   SERVER_VERSION,
   handleMcpRequest,
   sseKeepalive,
+  toolErrorPayload,
+  toolResultText,
 } from "./mcp.js";
 export type { Clock, MachineBackend, McpHandlerOptions } from "./mcp.js";
 export {

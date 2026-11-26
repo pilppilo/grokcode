@@ -13,6 +13,7 @@ export interface SpawnSpec {
   cwd: string;
   platform: PathPlatform;
   shell: boolean;
+  stdin?: boolean;
   /** Shell command text. Required when shell is true. */
   command?: string;
   env?: NodeJS.ProcessEnv;
@@ -22,6 +23,7 @@ export interface SpawnSpec {
 
 export interface Spawned {
   stdout: Readable | null;
+  sendInput?(input: string): Promise<void>;
   stderr: Readable | null;
   kill(signal?: NodeJS.Signals): void | Promise<void>;
   onExit(cb: (code: number | null, signal: NodeJS.Signals | null, error?: Error) => void): void;
@@ -248,28 +250,54 @@ function wrap(child: ChildProcess, platform: PathPlatform, env: NodeJS.ProcessEn
   };
   child.on("error", (error) => finish(null, null, error));
   child.once("close", (code, signal) => finish(code, signal));
-  let killing = false;
+  const stdin = child.stdin;
+  // A child can close the pipe while a write is pending.
+  stdin?.on("error", () => {});
+  let killing: Promise<void> | undefined;
   return {
     stdout: child.stdout,
     stderr: child.stderr,
+    ...(stdin ? {
+      async sendInput(input: string) {
+        if (result || killing || !stdin.writable || stdin.writableLength > 0) {
+          throw new ToolError("Job stdin is closed or busy.", "input_unavailable");
+        }
+        await new Promise<void>((resolve, reject) => {
+          stdin.write(input, "utf8", (error) => {
+            if (error) reject(new ToolError("Could not write to job stdin.", "input_unavailable"));
+            else resolve();
+          });
+        });
+      },
+    } : {}),
     kill() {
       const pid = child.pid;
-      if (!pid || killing) return;
-      killing = true;
+      if (killing) return killing;
+      if (!pid || result) return;
       if (platform === "win32") {
         const root = env.SystemRoot ?? process.env.SystemRoot ?? "C:\\Windows";
         const killer = spawn(pathWin32.join(root, "System32", "taskkill.exe"), ["/pid", String(pid), "/t", "/f"], {
           windowsHide: true,
           stdio: "ignore",
         });
-        killer.on("error", () => child.kill("SIGKILL"));
-        killer.on("exit", (code) => { if (code !== 0) child.kill("SIGKILL"); });
-        return;
+        killing = new Promise<void>((resolve, reject) => {
+          killer.once("error", reject);
+          killer.once("exit", (code) => {
+            if (code === 0) resolve();
+            else reject(new Error("taskkill failed"));
+          });
+        }).catch(() => {
+          killing = undefined;
+          throw new ToolError("Windows could not terminate the job process tree.", "kill_failed");
+        });
+        return killing;
       }
       try {
         process.kill(-pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          throw new ToolError("Could not terminate the job process group.", "kill_failed");
+        }
       }
     },
     onExit(cb) {
@@ -287,7 +315,7 @@ export function defaultSpawn(spec: SpawnSpec): Spawned {
     shell: false,
     windowsHide: true,
     detached: spec.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+    stdio: [spec.stdin ? "pipe" : "ignore", "pipe", "pipe"] as ["pipe" | "ignore", "pipe", "pipe"],
   };
   const launch = (child: ChildProcess) => {
     trackChild(child);
@@ -347,7 +375,7 @@ export async function runAndWait(
     else stderr += chunk;
     if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > maxOutput) {
       truncated = true;
-      spawned.kill("SIGTERM");
+      void Promise.resolve().then(() => spawned.kill("SIGTERM")).catch(() => {});
     }
   };
   spawned.stdout?.on("data", (chunk: string) => push("stdout", String(chunk)));
@@ -369,7 +397,7 @@ export async function runAndWait(
         clearTimeout(grace);
         finish(null, true);
       });
-      void Promise.resolve(spawned.kill("SIGTERM")).catch(() => {
+      void Promise.resolve().then(() => spawned.kill("SIGTERM")).catch(() => {
         clearTimeout(grace);
         finish(null, true);
       });

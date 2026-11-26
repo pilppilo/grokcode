@@ -188,7 +188,9 @@ test("git tools and run_command share the safety wrapper and honor the allowlist
   const spawnImpl: SpawnFn = (spec) => {
     calls.push({ argv: spec.argv, env: spec.env });
     const stdout = new PassThrough();
-    const text = spec.argv.includes("symbolic-ref")
+    const text = spec.argv.includes("--path-format=absolute")
+      ? `${root}\n`
+      : spec.argv.includes("symbolic-ref")
       ? "main\n"
       : spec.argv.includes("--get-regexp")
         ? "filter.example.driver.clean\0"

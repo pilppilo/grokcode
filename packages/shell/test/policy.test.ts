@@ -22,6 +22,36 @@ function policy(extra: Record<string, unknown> = {}, platform: "posix" | "win32"
 
 const posix = { platform: "posix" as const, cwd: "/work/app", home: "/home/ada" };
 
+test("OpenCode and process control are denied for argv, shell strings, and shell wrappers", () => {
+  const denied = [
+    ["opencode", "service", "stop"], ["opencode.exe", "serve"], ["opencode.cmd", "restart"],
+    ["opencode.ps1", "web"], ["taskkill", "/im", "opencode.exe"], ["tskill", "123"],
+    ["Stop-Process", "-Name", "opencode"], ["spps", "123"], ["kill", "123"],
+    ["pkill", "123"], ["killall", "123"], ["sc.exe", "stop", "service"],
+    ["net", "stop", "service"], ["Stop-Service", "service"], ["Restart-Service", "service"],
+    ["wmic", "process", "where", "name=x", "delete"],
+  ];
+  for (const platform of ["posix", "win32"] as const) {
+    const cwd = platform === "win32" ? "C:\\Work" : "/work";
+    const parsed = policy({
+      allowShell: true, allowInterpreters: true,
+      allow: [...denied.map(([command]) => command!.replace(/\.(?:cmd|ps1)$/i, "")), "pwsh", "git", "rg", "go"]
+        .map((command) => ({ command })),
+    }, platform, cwd);
+    const options = { platform, cwd, home: cwd };
+    for (const argv of denied) {
+      const command = argv.join(" ");
+      assert.equal(evaluateCommand(parsed, argv, options).allow, false, command);
+      assert.equal(evaluateShell(parsed, command).allow, false, command);
+      assert.equal(evaluateCommand(parsed, ["pwsh", "-c", command], options).allow, false, command);
+    }
+    for (const argv of [["git", "status"], ["rg", "needle"], ["go", "test"]]) {
+      assert.equal(evaluateCommand(parsed, argv, options).allow, true, argv.join(" "));
+      assert.equal(evaluateShell(parsed, argv.join(" ")).allow, true);
+    }
+  }
+});
+
 test("the example policy allowlists git status and still denies git -c and upload-pack", () => {
   const text = readFileSync(new URL("../policy.example.json", import.meta.url), "utf8");
   const parsed = parsePolicy(text, "posix", "/home/ada");

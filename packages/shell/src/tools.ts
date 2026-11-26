@@ -10,8 +10,8 @@ export const SHELL_INSTRUCTIONS = [
   "Call check_repo with a project and optional project-relative cwd to discover repository guidance. When a project tool reports a different guidance scope or fingerprint, call check_repo for that scope. Local policy and user authorization govern every tool call.",
   "run_command takes argv (the program plus arguments) and an absolute cwd inside those roots. It does not invoke a shell unless shell is true and that machine's policy sets allowShell, which means an arbitrary shell.",
   "Commands are deny-by-default. A command must match the per-machine allowlist, and a hard deny list blocks privilege escalation, recursive deletes of a drive root, and argument-based code execution such as git -c.",
-  "wait defaults to true and blocks for up to about 20 seconds. Poll get_job or poll_output for running jobs, or use kill_job to cancel.",
-  "read_file, list_dir, write_file, and apply_patch stay inside the allowed roots and refuse symlink escapes.",
+  "wait defaults to true and blocks for up to about 45 seconds. Poll get_job or poll_output for running jobs, or use kill_job to cancel.",
+  "read_file, list_dir, write_file, edit_file, and apply_patch stay inside the allowed roots and refuse symlink escapes.",
   "git_commit_push only commits paths you name, and only on a branch in the policy allowlist. Push stays off unless the policy sets git.push. If push is requested while git.push is false, nothing is staged or committed. A successful result includes the commit SHA. If the commit succeeds and the push fails, the error includes that SHA: retry only the push and do not create another commit.",
   "Mutating tools are marked destructive so the client can ask the owner to confirm. There is no second prompt on the PC.",
 ].join(" ");
@@ -106,7 +106,7 @@ const tools: ShellTool[] = [
   {
     name: "run_command",
     description:
-      "Run a program on a machine. argv is the program and its arguments with no shell interpretation. cwd must be an absolute path inside the allowed roots. shell true is rejected unless that machine's policy sets allowShell, and even then a hard deny list blocks piping curl into a shell, sudo, and recursive deletes of a drive root. wait defaults to true for up to about 20 seconds. A running command returns a jobId; poll get_job or poll_output. Destructive: the client should ask the owner to confirm.",
+      "Run a program on a machine. argv is the program and its arguments with no shell interpretation. cwd must be an absolute path inside the allowed roots. shell true is rejected unless that machine's policy sets allowShell, and even then a hard deny list blocks piping curl into a shell, sudo, and recursive deletes of a drive root. wait defaults to true for up to about 45 seconds. A running command returns a jobId; poll get_job or poll_output. Destructive: the client should ask the owner to confirm.",
     op: "shell_run",
     annotations: mutating,
     inputSchema: {
@@ -126,10 +126,11 @@ const tools: ShellTool[] = [
           description: "Run the command string in an arbitrary shell (pwsh on Windows, bash on Linux). Default false. Denied unless policy allowShell is true.",
         },
         command: { type: "string", description: "Shell command string. Used only when shell is true." },
+        stdin: { type: "boolean", description: "Keep stdin open for send_input. Requires allowJobInput." },
         timeoutMs: { type: "integer", minimum: 100, maximum: 120000, description: "Kill the process after this many milliseconds." },
         wait: {
           type: "boolean",
-          description: "Poll until the process exits or about 20 seconds pass. Default true; false returns immediately with a jobId.",
+          description: "Wait up to about 45 seconds for the process to exit. Default true; false returns immediately with a jobId.",
         },
       },
       required: ["cwd"],
@@ -138,7 +139,7 @@ const tools: ShellTool[] = [
   },
   {
     name: "get_job",
-    description: "Read a command started by run_command: status, exit code, and the first output page. Pass nextOffset to poll_output for more. Read-only.",
+    description: "Wait up to about 45 seconds for command status, exit code, and an output preview. If bytes were omitted, pass outputFile to read_file for the saved output, or nextOffset to poll_output. Status output_limit means the command exceeded the capture budget.",
     op: "shell_job",
     annotations: readOnly,
     inputSchema: {
@@ -146,6 +147,7 @@ const tools: ShellTool[] = [
       properties: {
         machine,
         jobId: { type: "string" },
+        wait: { type: "boolean", description: "Set false to return the current status immediately." },
       },
       required: ["jobId"],
       additionalProperties: false,
@@ -169,18 +171,18 @@ const tools: ShellTool[] = [
   },
   {
     name: "read_file",
-    description: "Read a UTF-8 file inside the allowed roots. Symlinks that leave the roots are denied. Read-only.",
+    description: "Read up to 800 lines or 46,000 bytes from a UTF-8 file inside the allowed roots. The response includes page line numbers, file totals, and hasMore. When hasMore is true, pass nextOffset as offset with the same path and line range.",
     op: "shell_read_file",
     annotations: readOnly,
     inputSchema: {
       type: "object",
       properties: {
         machine,
-        path: { type: "string", description: "Absolute file path inside the allowed roots." },
-        offset: { type: "integer", minimum: 0, description: "Byte offset. Default 0." },
-        startLine: { type: "integer", minimum: 1, description: "First line, inclusive. Omit offset when using line ranges." },
-        endLine: { type: "integer", minimum: 1, description: "Last line, inclusive. Omit offset when using line ranges." },
-        maxBytes: { type: "integer", minimum: 1, description: "Maximum bytes. Defaults to 32 KiB and is capped by policy." },
+        path: { type: "string", description: "Absolute file path inside the allowed roots, or the outputFile value from a finished job." },
+        offset: { type: "integer", minimum: 0, description: "UTF-8 byte offset. Use the previous page's nextOffset to continue." },
+        startLine: { type: "integer", minimum: 1, description: "First line of the range, inclusive. Repeat on continuation requests." },
+        endLine: { type: "integer", minimum: 1, description: "Last line of the range, inclusive. Repeat on continuation requests." },
+        maxBytes: { type: "integer", minimum: 1, description: "Maximum source bytes, capped at 46,000 and by machine policy." },
       },
       required: ["path"],
       additionalProperties: false,
@@ -219,6 +221,24 @@ const tools: ShellTool[] = [
     },
   },
   {
+    name: "edit_file",
+    description: "Replace exact UTF-8 text in an existing file. Matching treats LF and CRLF as equivalent. By default the old text must occur exactly once. Returns line counts and preserves the file's permissions. Ask the owner to confirm this write.",
+    op: "shell_edit_file",
+    annotations: { ...mutating, openWorldHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        machine,
+        path: { type: "string", description: "Destination file inside the allowed roots." },
+        oldText: { type: "string", minLength: 1, description: "Exact text to find, including whitespace." },
+        newText: { type: "string", description: "Replacement text. Use an empty string to delete the match." },
+        replaceAll: { type: "boolean", description: "Replace all non-overlapping matches. Defaults to false." },
+      },
+      required: ["path", "oldText", "newText"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "apply_patch",
     description:
       "Apply a unified diff to files under cwd. Every path must stay inside the allowed roots. Destructive: the client should ask the owner to confirm.",
@@ -247,6 +267,25 @@ const tools: ShellTool[] = [
         cwd: { type: "string", description: "Absolute repository directory inside the allowed roots." },
       },
       required: ["cwd"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_jobs",
+    description: "List retained jobs and collect job completion notices for this session.",
+    op: "shell_list_jobs",
+    annotations: { ...mutating, destructiveHint: false, openWorldHint: false },
+    inputSchema: { type: "object", properties: { machine }, additionalProperties: false },
+  },
+  {
+    name: "send_input",
+    description: "Write text to an opted-in job's stdin. Include a newline if the command expects one.",
+    op: "shell_send_input",
+    annotations: mutating,
+    inputSchema: {
+      type: "object",
+      properties: { machine, jobId: { type: "string" }, input: { type: "string", minLength: 1, maxLength: 4096 } },
+      required: ["jobId", "input"],
       additionalProperties: false,
     },
   },
@@ -336,7 +375,7 @@ const tools: ShellTool[] = [
   },
 ];
 
-const projectFileTools = new Set(["run_command", "read_file", "list_dir", "write_file", "search_files", "apply_patch", "git_status", "git_diff", "git_log", "git_commit_push"]);
+const projectFileTools = new Set(["run_command", "read_file", "list_dir", "write_file", "edit_file", "search_files", "apply_patch", "git_status", "git_diff", "git_log", "git_commit_push"]);
 
 export const SHELL_TOOLS: ShellTool[] = tools.map((tool) => {
   const title = tool.name.replaceAll("_", " ").replace(/^./, (first) => first.toUpperCase());

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 
 import { ToolError, type PathPlatform } from "grokcode-shared";
+import { DEFAULT_OUTPUT_PREVIEW_BYTES } from "./output.js";
 
 import {
   commandBase,
@@ -22,6 +23,7 @@ export interface AllowRule {
 export interface PolicyLimits {
   timeoutMs: number;
   maxOutputBytes: number;
+  outputPreviewBytes?: number;
   maxWriteBytes: number;
   maxReadBytes: number;
 }
@@ -38,6 +40,7 @@ export interface Policy {
   roots: string[];
   projects?: Record<string, Project>;
   allowShell: boolean;
+  allowJobInput?: boolean;
   allowInterpreters: boolean;
   allow: AllowRule[];
   git: { branches: string[]; push: boolean };
@@ -61,6 +64,7 @@ const KNOWN_KEYS = new Set([
   "roots",
   "projects",
   "allowShell",
+  "allowJobInput",
   "allowInterpreters",
   "allow",
   "git",
@@ -132,7 +136,16 @@ const ALWAYS_DENY = new Set([
   "dd",
 ]);
 
+const processControlCommands = "opencode|taskkill|tskill|stop-process|spps|kill|pkill|killall|stop-service|restart-service";
+const commandExtension = "(?:\\.(?:exe|cmd|bat|com|ps1))?";
+const processControlName = new RegExp(`^(?:${processControlCommands})${commandExtension}$`, "i");
+const processControlShell = new RegExp(
+  `(?:^|[\\s/\\\\:;|&()'"])(?:(?:${processControlCommands})${commandExtension}(?=$|[\\s;|&()'"])|(?:sc|net|net1)${commandExtension}['"]?\\s+['"]?stop\\b|wmic${commandExtension}['"]?\\s+process\\b[^;|&\\n]*\\b(?:delete|terminate)\\b)`,
+  "i",
+);
+
 const SHELL_PATTERNS: Array<[RegExp, string]> = [
+  [processControlShell, "OpenCode and process control commands are denied"],
   [/\b(curl|wget|fetch)\b[^|\n]{0,240}\|\s*(ba)?sh\b/i, "piping a download into a shell is denied"],
   [/\b(curl|wget)\b[^|\n]{0,240}\|\s*(zsh|dash|ksh|fish|pwsh|powershell)\b/i, "piping a download into a shell is denied"],
   [
@@ -190,6 +203,11 @@ export function parsePolicy(text: string, platform: PathPlatform, home: string):
       DEFAULT_LIMITS.maxOutputBytes,
       HARD_MAX_OUTPUT_BYTES,
     ),
+    outputPreviewBytes: Math.max(4, clamp(
+      numberOr(limitsIn.outputPreviewBytes, DEFAULT_OUTPUT_PREVIEW_BYTES),
+      DEFAULT_OUTPUT_PREVIEW_BYTES,
+      DEFAULT_OUTPUT_PREVIEW_BYTES,
+    )),
     maxWriteBytes: clamp(
       numberOr(limitsIn.maxWriteBytes, DEFAULT_LIMITS.maxWriteBytes),
       DEFAULT_LIMITS.maxWriteBytes,
@@ -206,6 +224,7 @@ export function parsePolicy(text: string, platform: PathPlatform, home: string):
     roots,
     ...(projects ? { projects } : {}),
     allowShell: raw.allowShell === true,
+    allowJobInput: raw.allowJobInput === true,
     allowInterpreters: raw.allowInterpreters === true,
     allow,
     git,
@@ -459,6 +478,12 @@ function hardDeny(argv: readonly string[], platform: PathPlatform): string | nul
   const name = argv[0] ?? "";
   if (!isBareCommandName(name)) return "command must be a bare name with no path";
   if (/^agy(?:\.exe|\.cmd|\.bat|\.com|\.ps1)?$/i.test(name)) return "Antigravity is denied";
+  if (processControlName.test(name) ||
+      (/^(sc|net|net1)(?:\.exe)?$/i.test(name) && /^stop$/i.test(argv[1] ?? "")) ||
+      (/^wmic(?:\.exe)?$/i.test(name) && /^process$/i.test(argv[1] ?? "") && argv.slice(2).some((arg) => /^(delete|terminate)$/i.test(arg))) ||
+      (isInterpreterCommand(name.toLowerCase().replace(/\.exe$/, "")) && processControlShell.test(argv.slice(1).join(" ")))) {
+    return "OpenCode and process control commands are denied";
+  }
   if (/\.(?:cmd|bat|com)$/i.test(name)) return "Windows script shims (.cmd, .bat, .com) are denied";
   const base = commandBase(name, platform);
   if (!base) return "command is empty";

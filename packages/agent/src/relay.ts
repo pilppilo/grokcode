@@ -14,7 +14,7 @@ export interface RelayConnectionOptions {
   url: string;
   name: string;
   token: string;
-  execute: (op: string, params: unknown) => Promise<unknown>;
+  execute: (op: string, params: unknown, signal?: AbortSignal) => Promise<unknown>;
   signal: AbortSignal;
   opencode?: { api?: "v1" | "v2"; version?: string };
   /** Test hook. Defaults to the ws client. */
@@ -57,10 +57,12 @@ export function runRelayConnection(options: RelayConnectionOptions): Promise<voi
   });
 
   return new Promise((resolve, reject) => {
+    const connection = new AbortController();
     let settled = false;
     const cleanup = () => {
       if (settled) return false;
       settled = true;
+      connection.abort();
       clearInterval(ping);
       options.signal.removeEventListener("abort", onAbort);
       return true;
@@ -125,9 +127,11 @@ export function runRelayConnection(options: RelayConnectionOptions): Promise<voi
       }
       if (message.type !== "rpc") return;
       try {
-        const data = await options.execute(message.op, message.params);
+        const data = await options.execute(message.op, message.params, connection.signal);
+        if (settled) return;
         for (const frame of encodeResultFrames(message.id, data)) socket.send(frame);
       } catch (err) {
+        if (settled) return;
         socket.send(
           encodeMessage({
             type: "result",

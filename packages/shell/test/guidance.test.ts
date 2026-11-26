@@ -72,7 +72,6 @@ test("command and test polling preserve guidance on exit and sync timeout", asyn
   const guidance = { scope: ".", paths: ["AGENTS.md"], fingerprint: "hash", incomplete: false };
   for (const name of ["run_command", "run_tests"]) {
     for (const expires of [false, true]) {
-      let now = 0;
       const backend = {
         mode: "direct",
         listMachines: async () => [{ name: "pc" }],
@@ -82,7 +81,7 @@ test("command and test polling preserve guidance on exit and sync timeout", asyn
         },
       } as MachineBackend;
       const result = await callShellTool(backend, name, { timeoutMs: 10 }, {
-        clock: { now: () => now, sleep: async (ms) => { now += ms; } },
+        maxSyncWaitMs: 100,
       }) as { status: string; guidance: unknown };
       assert.equal(result.status, expires ? "running" : "exited");
       assert.deepEqual(result.guidance, guidance);

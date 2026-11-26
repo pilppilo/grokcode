@@ -3,7 +3,7 @@ import { readdirSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
 import { compareKey, pathApi } from "./confine.js";
-import { confineCwd, readFile, type FileContext } from "./files.js";
+import { confineCwd, readGuidanceFile, type FileContext } from "./files.js";
 
 const filenames = ["AGENTS.override.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
 const textBudget = 32 * 1024;
@@ -27,7 +27,7 @@ export function projectGuidance(root: string, cwd: string, ctx: FileContext) {
       )).find(Boolean);
       if (!entry) continue;
       const relativePath = [...parts.slice(0, depth), entry.name].join("/");
-      const result = readFile(path.join(directory, entry.name), ctx, 0, rawReadLimit, undefined, false);
+      const result = readGuidanceFile(path.join(directory, entry.name), ctx, rawReadLimit);
       const bytes = Buffer.from(result.content);
       const clipped = bytes.length > remaining;
       const text = clipped ? new StringDecoder("utf8").write(bytes.subarray(0, remaining)) : result.content;

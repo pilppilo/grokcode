@@ -1,14 +1,17 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import { ToolError, asRecord, errorMessage, requiredString, type PathPlatform } from "grokcode-shared";
+import { ToolError, asRecord, errorMessage, requiredString, toolErrorPayload, type PathPlatform } from "grokcode-shared";
 
-import { appendAudit, type AuditEvent } from "./audit.js";
+import { appendAudit, auditMetrics, type AuditEvent } from "./audit.js";
+import { CodeExecutions } from "./code-executions.js";
+import { editFile } from "./edit.js";
 import {
   confineCwd,
   confineFile,
   listDir,
-  readFile,
+  readFilePage,
+  readPage,
   readTextIfExists,
   validatePatchFile,
   removeFile,
@@ -20,6 +23,7 @@ import { assertProjectRepo, checkRepo, gitCommit, gitInspect, gitStatus, wrapGit
 import { guidanceNotice, projectGuidance } from "./guidance.js";
 import { searchFiles } from "./search.js";
 import { TaskStore } from "./tasks.js";
+import { MAX_JOB_HOLD_MS } from "./hold.js";
 import { JobTable, type JobView } from "./jobs.js";
 import { applyHunks, parseUnifiedDiff } from "./patch.js";
 import { evaluateCommand, evaluateShell, parsePolicy, type LoadedPolicy, type Policy } from "./policy.js";
@@ -32,7 +36,9 @@ export interface ShellRuntimeOptions {
   loadPolicy: () => LoadedPolicy;
   auditPath?: string;
   taskDir?: string;
-  /** Policy file and audit log. A root that contains either is refused. */
+  outputDir?: string;
+  enableCodeMode?: boolean;
+  /** Protected local state. A root that contains it is refused. */
   protectedPaths?: string[];
   jobs?: JobTable;
   spawnImpl?: SpawnFn;
@@ -40,7 +46,7 @@ export interface ShellRuntimeOptions {
 }
 
 export interface ShellRuntime {
-  execute(op: string, params: unknown): Promise<unknown>;
+  execute(op: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
   killAll(): void;
 }
 
@@ -78,51 +84,103 @@ const projectPathField: Partial<Record<string, "path" | "cwd">> = {
   shell_read_file: "path",
   shell_list_dir: "path",
   shell_write_file: "path",
+  shell_edit_file: "path",
   shell_search_files: "cwd",
   shell_apply_patch: "cwd",
 };
 
 export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
-  const jobs = options.jobs ?? new JobTable(options.now);
+  const jobs = options.jobs ?? new JobTable(options.now, undefined, options.outputDir);
   const tasks = options.taskDir ? new TaskStore(options.taskDir, jobs) : undefined;
   const spawnImpl = options.spawnImpl ?? defaultSpawn;
+  const code = options.enableCodeMode && options.auditPath
+    ? new CodeExecutions((op, args, signal, sessionScope) => execute(op, { ...asRecord(args), sessionScope }, signal, true))
+    : undefined;
 
-  function audit(event: AuditEvent): void {
-    if (options.auditPath) appendAudit(options.auditPath, event);
+  function audit(event: AuditEvent): boolean {
+    return !!options.auditPath && appendAudit(options.auditPath, event);
   }
 
-  async function execute(op: string, params: unknown): Promise<unknown> {
-    const record = asRecord(params);
-    const loaded = isolateRoots(options.loadPolicy(), options.platform, [...(options.protectedPaths ?? []), ...(options.taskDir ? [options.taskDir] : [])]);
-    const base: AuditEvent = {
+  async function execute(op: string, params: unknown, signal?: AbortSignal, requireAudit = false): Promise<unknown> {
+    const started = performance.now();
+    const { sessionScope: scope, ...record } = asRecord(params);
+    const sessionScope = typeof scope === "string" && /^[A-Za-z0-9_-]{43}$/.test(scope) ? scope : undefined;
+    const base = {
       ts: new Date(options.now?.() ?? Date.now()).toISOString(),
       tool: op,
-      decision: "deny",
-      ...auditFields(record),
+      decision: "deny" as const,
+      sessionId: sessionScope ?? null,
+      ...auditFields(op === "shell_send_input" ? { jobId: record.jobId } : record),
     };
     try {
-      const result = await dispatch(op, record, loaded);
+      signal?.throwIfAborted();
+      const loaded = isolateRoots(options.loadPolicy(), options.platform, [
+        ...(options.protectedPaths ?? []),
+        ...(options.auditPath ? [options.auditPath, `${options.auditPath}.1`] : []),
+        ...(options.taskDir ? [options.taskDir] : []),
+        ...(options.outputDir ? [options.outputDir] : []),
+      ]);
+      const result = op === "shell_send_input"
+        ? await sendInput(record, loaded, sessionScope, () => {
+            if (!audit({ ...base, ...auditMetrics(started), decision: "allow", phase: "admission" })) {
+              throw new ToolError("Job input audit is unavailable.", "audit_unavailable");
+            }
+          })
+        : await dispatch(op, record, loaded, signal, sessionScope);
       const jobId = result && typeof result === "object" && "jobId" in result && typeof result.jobId === "string" ? result.jobId : base.jobId;
-      audit({ ...base, decision: "allow", ...(jobId ? { jobId } : {}) });
+      const recorded = audit({ ...base, ...auditMetrics(started, result), decision: "allow", ...(jobId ? { jobId } : {}) });
+      if (requireAudit && !recorded) throw new ToolError("Nested read audit is unavailable.", "audit_unavailable");
       return result;
     } catch (err) {
-      audit({ ...base, decision: "deny", reason: errorMessage(err) });
+      audit({ ...base, ...auditMetrics(started, toolErrorPayload(err)), decision: "deny", reason: errorMessage(err) });
       throw err;
     }
   }
 
-  async function dispatch(op: string, record: Record<string, unknown>, loaded: LoadedPolicy): Promise<unknown> {
-    if (op === "shell_info") return machineInfo(loaded, options);
-    if (op === "shell_kill_job") return jobs.cancel(requiredString(record.jobId, "jobId", 80));
+  async function sendInput(record: Record<string, unknown>, loaded: LoadedPolicy, sessionScope: string | undefined, beforeWrite: () => void) {
     const policy = requirePolicy(loaded);
+    if (!policy.allowJobInput) throw new ToolError("Job input is disabled by policy.", "policy_denied");
+    const jobId = requiredString(record.jobId, "jobId", 80);
+    const input = record.input;
+    if (typeof input !== "string" || input.length === 0 || input.length > 4096) {
+      throw new ToolError("input must contain 1 to 4096 characters.", "invalid_argument");
+    }
+    confineCwd(jobs.get(jobId, sessionScope).cwd, { policy, platform: options.platform, home: options.home });
+    await jobs.sendInput(jobId, input, beforeWrite, sessionScope);
+    return { jobId };
+  }
+
+  async function dispatch(op: string, record: Record<string, unknown>, loaded: LoadedPolicy, signal?: AbortSignal, sessionScope?: string): Promise<unknown> {
+    if (op === "shell_info") return machineInfo(loaded, options);
+    if (op === "shell_kill_job") return jobs.cancel(requiredString(record.jobId, "jobId", 80), sessionScope);
+    const policy = requirePolicy(loaded);
+    if (op === "shell_list_jobs") return jobs.list(sessionScope);
+    if (op === "shell_code_execute" || op === "shell_code_poll" || op === "shell_code_cancel") {
+      if (!code) throw new ToolError("Code mode is disabled on this agent.", "code_disabled");
+      return code.dispatch(op, record, signal, sessionScope);
+    }
+    if (op === "shell_job") {
+      if (options.outputDir) {
+        const jobId = requiredString(record.jobId, "jobId", 80);
+        confineCwd(jobs.get(jobId, sessionScope).cwd, { policy, platform: options.platform, home: options.home });
+      }
+      return readJob(record, jobs, signal, sessionScope);
+    }
     if (op === "shell_task_status" || op === "shell_task_activity" || op === "shell_cancel_task") {
       if (!tasks) throw new ToolError("Task storage is unavailable.", "task_unavailable");
       const id = requiredString(record.taskId, "taskId", 80);
-      if (op === "shell_cancel_task") return tasks.cancel(id);
-      if (op === "shell_task_activity") return tasks.activity(id, numberArg(record.offset, "offset", 0, 10_000_000) ?? 0);
-      return tasks.status(id);
+      if (op === "shell_cancel_task") return tasks.cancel(id, sessionScope);
+      if (op === "shell_task_activity") return tasks.activity(id, numberArg(record.offset, "offset", 0, 10_000_000) ?? 0, sessionScope);
+      return tasks.status(id, sessionScope);
     }
     const ctx: FileContext = { policy, platform: options.platform, home: options.home };
+    if (op === "shell_read_file" && typeof record.path === "string" && record.path.startsWith("grokcode-output:")) {
+      if (record.project !== undefined) throw new ToolError("Omit project when reading a job output file.", "invalid_argument");
+      const jobId = record.path.slice("grokcode-output:".length);
+      const { cwd, file } = jobs.savedOutput(jobId, sessionScope);
+      confineCwd(cwd, ctx);
+      return { ...await readPage(file, policy.limits.maxReadBytes, readPageOptions(record, policy), true, signal), path: record.path };
+    }
     const field = projectPathField[op];
     if (field && (record.project !== undefined || op === "shell_check_repo" || op === "shell_run_tests" || op === "shell_run_task")) {
       const name = requiredString(record.project, "project", 64);
@@ -139,7 +197,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
       const input = record[field];
       const target = input === undefined ? "." : requiredString(input, field, 4096);
       record = { ...record, [field]: pathApi(options.platform).resolve(root, target) };
-      if (op.startsWith("shell_git_")) {
+      if (op === "shell_git_diff" || op === "shell_git_log") {
         await assertProjectRepo(confineCwd(record.cwd as string, ctx), ctx, spawnImpl);
       }
       if (op === "shell_run" && record.shell === true) {
@@ -160,8 +218,8 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         const argv = command === "test" ? project.testCommand : project.taskCommands?.[command];
         if (!argv || !Array.isArray(argv)) throw new ToolError(`This project has no configured ${command} command.`, "invalid_argument");
         const result = await tasks.start(name, command, (publish, capture) => startCommand(
-          { cwd: root, argv }, ctx, jobs, spawnImpl, true, publish, capture,
-        ), root);
+          { cwd: root, argv }, ctx, jobs, spawnImpl, sessionScope, true, publish, capture,
+        ), root, sessionScope);
         return { ...result, guidance: guidanceNotice(root, root, ctx) };
       }
       if (op === "shell_run_tests") {
@@ -171,25 +229,23 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
           throw new ToolError("Invalid test filter.", "invalid_argument");
         }
         const argv = filter === undefined ? project.testCommand : [...project.testCommand, filter];
-        const result = await startCommand({ cwd: root, argv }, ctx, jobs, spawnImpl, true);
+        const result = await startCommand({ cwd: root, argv }, ctx, jobs, spawnImpl, sessionScope, true);
         return { ...result, guidance: guidanceNotice(root, root, ctx) };
       }
       const cwd = field === "cwd" ? confineCwd(record.cwd as string, ctx) : undefined;
-      const result = asRecord(await dispatchShell(op, record, ctx));
+      const result = asRecord(await dispatchShell(op, record, ctx, signal, sessionScope));
       const resultPath = result.path as string;
       const scope = cwd ?? (op === "shell_list_dir" ? resultPath : pathApi(ctx.platform).dirname(resultPath));
       return { ...result, guidance: guidanceNotice(root, scope, ctx) };
     }
-    return dispatchShell(op, record, ctx);
+    return dispatchShell(op, record, ctx, signal, sessionScope);
   }
 
-  async function dispatchShell(op: string, record: Record<string, unknown>, ctx: FileContext): Promise<unknown> {
+  async function dispatchShell(op: string, record: Record<string, unknown>, ctx: FileContext, signal?: AbortSignal, sessionScope?: string): Promise<unknown> {
     const { policy } = ctx;
     switch (op) {
       case "shell_run":
-        return startCommand(record, ctx, jobs, spawnImpl);
-      case "shell_job":
-        return readJob(record, jobs);
+        return startCommand(record, ctx, jobs, spawnImpl, sessionScope);
       case "shell_search_files":
         return searchFiles(
           confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
@@ -208,22 +264,23 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
           record.staged === true,
         );
       case "shell_read_file": {
-        const offset = numberArg(record.offset, "offset", 0, 50_000_000) ?? 0;
-        const maxBytes = numberArg(record.maxBytes, "maxBytes", 1, policy.limits.maxReadBytes);
-        const start = numberArg(record.startLine, "startLine", 1, 50_000_001);
-        const end = numberArg(record.endLine, "endLine", start ?? 1, 50_000_001);
-        if (record.offset !== undefined && (start !== undefined || end !== undefined)) {
-          throw new ToolError("offset cannot be combined with line ranges.", "invalid_argument");
-        }
-        return readFile(
-          requiredString(record.path, "path", 4096), ctx, offset, maxBytes,
-          start !== undefined || end !== undefined ? { start: start ?? 1, end } : undefined,
-        );
+        return readFilePage(requiredString(record.path, "path", 4096), ctx, readPageOptions(record, policy), signal);
       }
       case "shell_list_dir":
         return listDir(requiredString(record.path, "path", 4096), ctx);
       case "shell_write_file":
         return writeFile(requiredString(record.path, "path", 4096), contentsArg(record.contents, policy.limits.maxWriteBytes), ctx);
+      case "shell_edit_file": {
+        if (record.replaceAll !== undefined && typeof record.replaceAll !== "boolean") {
+          throw new ToolError("replaceAll must be a boolean.", "invalid_argument");
+        }
+        return editFile(
+          requiredString(record.path, "path", 4096),
+          contentsArg(record.oldText, policy.limits.maxReadBytes, "oldText"),
+          contentsArg(record.newText, policy.limits.maxWriteBytes, "newText"),
+          record.replaceAll === true, ctx, signal,
+        );
+      }
       case "shell_apply_patch":
         return applyPatch(record, ctx);
       case "shell_git_status":
@@ -233,7 +290,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
           {
             cwd: confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
             platform: options.platform,
-            policy,
+            policy: ctx.policy,
             home: options.home,
             message: requiredString(record.message, "message", 5_000),
             paths: stringArray(record.paths, "paths"),
@@ -249,6 +306,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
   return {
     execute,
     killAll: () => {
+      code?.cancelAll();
       jobs.killAll();
       reapDetachedChildren();
     },
@@ -288,6 +346,7 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
       name, root, defaultBranch, hasTestCommand: Boolean(testCommand), tasks: [...(testCommand ? ["test"] : []), ...Object.keys(taskCommands ?? {})],
     })),
     allowShell: policy?.allowShell ?? false,
+    allowJobInput: policy?.allowJobInput ?? false,
     allowInterpreters: policy?.allowInterpreters ?? false,
     commands: policy?.allow.map((rule) => rule.command) ?? [],
     commandRules: policy?.allow.map(({ command, subcommands }) => ({ command, subcommands })) ?? [],
@@ -296,8 +355,10 @@ function machineInfo(loaded: LoadedPolicy, options: ShellRuntimeOptions) {
   };
 }
 
-async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn, keepTail = false, onChange?: (view: JobView) => void, onOutput?: (chunk: Buffer | string) => void) {
+async function startCommand(record: Record<string, unknown>, ctx: FileContext, jobs: JobTable, spawnImpl: SpawnFn, sessionScope?: string, keepTail = false, onChange?: (view: JobView) => void, onOutput?: (chunk: Buffer | string) => void) {
   const shell = record.shell === true;
+  const stdin = record.stdin === true;
+  if (stdin && !ctx.policy.allowJobInput) throw new ToolError("Job input is disabled by policy.", "policy_denied");
   const cwd = confineCwd(requiredString(record.cwd, "cwd", 4096), ctx);
   const timeoutMs = Math.min(
     numberArg(record.timeoutMs, "timeoutMs", 100, ctx.policy.limits.timeoutMs) ?? ctx.policy.limits.timeoutMs,
@@ -308,10 +369,10 @@ async function startCommand(record: Record<string, unknown>, ctx: FileContext, j
     const decision = evaluateShell(ctx.policy, command);
     if (!decision.allow) throw new ToolError(decision.reason, "policy_denied");
     return jobs.start(
-      { argv: [], command, cwd, platform: ctx.platform, shell: true },
+      { argv: [], command, cwd, platform: ctx.platform, shell: true, stdin },
       timeoutMs,
       ctx.policy.limits.maxOutputBytes,
-      spawnImpl, keepTail, onChange, onOutput,
+      spawnImpl, keepTail, onChange, onOutput, ctx.policy.limits.outputPreviewBytes, sessionScope,
     );
   }
   const argv = stringArray(record.argv, "argv");
@@ -322,27 +383,36 @@ async function startCommand(record: Record<string, unknown>, ctx: FileContext, j
     if (record.project !== undefined || keepTail) await assertProjectRepo(cwd, ctx, spawnImpl);
     const wrapped = await wrapGitCommand(argv, ctx, cwd, spawnImpl);
     return jobs.start(
-      { argv: wrapped.argv, cwd, platform: ctx.platform, shell: false, env: wrapped.env, roots: ctx.policy.roots },
+      { argv: wrapped.argv, cwd, platform: ctx.platform, shell: false, stdin, env: wrapped.env, roots: ctx.policy.roots },
       timeoutMs,
       ctx.policy.limits.maxOutputBytes,
-      spawnImpl, keepTail, onChange, onOutput,
+      spawnImpl, keepTail, onChange, onOutput, ctx.policy.limits.outputPreviewBytes, sessionScope,
     );
   }
   return jobs.start(
-    { argv, cwd, platform: ctx.platform, shell: false, roots: ctx.policy.roots },
+    { argv, cwd, platform: ctx.platform, shell: false, stdin, roots: ctx.policy.roots },
     timeoutMs,
     ctx.policy.limits.maxOutputBytes,
-    spawnImpl, keepTail, onChange, onOutput,
+    spawnImpl, keepTail, onChange, onOutput, ctx.policy.limits.outputPreviewBytes, sessionScope,
   );
 }
 
-function readJob(record: Record<string, unknown>, jobs: JobTable) {
+function readPageOptions(record: Record<string, unknown>, policy: Policy) {
+  const offset = numberArg(record.offset, "offset", 0, Number.MAX_SAFE_INTEGER);
+  const maxBytes = numberArg(record.maxBytes, "maxBytes", 1, policy.limits.maxReadBytes);
+  const startLine = numberArg(record.startLine, "startLine", 1, Number.MAX_SAFE_INTEGER);
+  const endLine = numberArg(record.endLine, "endLine", startLine ?? 1, Number.MAX_SAFE_INTEGER);
+  return { offset, maxBytes, startLine, endLine };
+}
+
+function readJob(record: Record<string, unknown>, jobs: JobTable, signal?: AbortSignal, sessionScope?: string) {
   const jobId = requiredString(record.jobId, "jobId", 80);
   if (record.view === "poll" || record.offset != null) {
-    const offset = numberArg(record.offset, "offset", 0, 10_000_000) ?? 0;
-    return jobs.poll(jobId, offset);
+    const offset = numberArg(record.offset, "offset", 0, Number.MAX_SAFE_INTEGER) ?? 0;
+    return jobs.poll(jobId, offset, sessionScope);
   }
-  return jobs.get(jobId);
+  const holdMs = numberArg(record.holdMs, "holdMs", 0, MAX_JOB_HOLD_MS) ?? 0;
+  return jobs.wait(jobId, holdMs, signal, sessionScope);
 }
 
 function applyPatch(record: Record<string, unknown>, ctx: FileContext) {
@@ -390,10 +460,15 @@ function locate(input: string | null, ctx: FileContext, cwd: string, allowMissin
   return target;
 }
 
-function contentsArg(value: unknown, maxBytes: number): string {
-  if (typeof value !== "string") throw new ToolError("contents is required.", "invalid_argument");
-  if (value.includes("\0")) throw new ToolError("contents contains a NUL byte.", "invalid_argument");
-  if (Buffer.byteLength(value) > maxBytes) throw new ToolError(`contents exceed the write cap of ${maxBytes} bytes.`, "too_large");
+function contentsArg(value: unknown, maxBytes: number, field = "contents"): string {
+  if (typeof value !== "string") throw new ToolError(`${field} is required.`, "invalid_argument");
+  if (value.includes("\0")) throw new ToolError(`${field} contains a NUL byte.`, "invalid_argument");
+  if (Buffer.byteLength(value) > maxBytes) {
+    const message = field === "contents"
+      ? `contents exceed the write cap of ${maxBytes} bytes.`
+      : `${field} exceeds the size cap of ${maxBytes} bytes.`;
+    throw new ToolError(message, "too_large");
+  }
   return value;
 }
 
@@ -414,8 +489,8 @@ function numberArg(value: unknown, field: string, min: number, max: number): num
   return n;
 }
 
-function auditFields(record: Record<string, unknown>): Partial<AuditEvent> {
-  const fields: Partial<AuditEvent> = {};
+function auditFields(record: Record<string, unknown>): Partial<Pick<AuditEvent, "argv" | "path" | "paths" | "cwd" | "jobId">> {
+  const fields: Partial<Pick<AuditEvent, "argv" | "path" | "paths" | "cwd" | "jobId">> = {};
   if (Array.isArray(record.argv)) fields.argv = record.argv.filter((item): item is string => typeof item === "string");
   else if (typeof record.command === "string") fields.argv = [record.command];
   if (typeof record.path === "string") fields.path = record.path;

@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import {
   DEFAULT_SYNC_WAIT_MS,
   MAX_SYNC_WAIT_MS,
@@ -13,12 +15,14 @@ import {
   SHELL_SERVER_NAME,
   SHELL_SERVER_VERSION,
   SHELL_TOOLS,
+  CODE_TOOLS,
   callShellTool,
 } from "grokcode-shell/remote";
 
 import {
   GEMINI_MCP_PATH,
   accessTokenSubject,
+  sha256,
   handleOAuthRequest,
   isOAuthPath,
   wwwAuthenticate,
@@ -27,13 +31,14 @@ import {
 
 export interface HubBridge {
   listMachines(): Promise<MachineInfo[]>;
-  call(machine: string, op: string, params: unknown, timeoutMs?: number): Promise<unknown>;
+  call(machine: string, op: string, params: unknown, timeoutMs?: number, signal?: AbortSignal): Promise<unknown>;
 }
 
 export interface RelayHttpOptions {
   mcpToken?: string;
   bridge: HubBridge;
   maxSyncWaitMs?: number;
+  enableCodeMode?: boolean;
   /**
    * OAuth 2.1 for the Gemini shell endpoint. Absent in tests that only cover
    * the original bearer `/mcp` route. Static bearer auth keeps working either way.
@@ -95,7 +100,7 @@ export async function handleRelayRequest(request: Request, options: RelayHttpOpt
 async function handleGemini(request: Request, options: RelayHttpOptions): Promise<Response> {
   const origin = options.oauth?.publicOrigin || new URL(request.url).origin;
   if (request.method === "OPTIONS") {
-    return handleMcpRequest(request, geminiMcpOptions(options));
+    return handleMcpRequest(request, geminiMcpOptions(options, request.signal));
   }
   const presented = bearerToken(request.headers.get("authorization"));
   const subject = presented && options.oauth
@@ -114,23 +119,34 @@ async function handleGemini(request: Request, options: RelayHttpOptions): Promis
       },
     });
   }
-  return handleMcpRequest(request, geminiMcpOptions(options));
+  const header = request.headers.get("mcp-session-id");
+  const sessionId = randomBytes(32).toString("base64url");
+  // Keep the namespace stable across relay restarts without storing the session capability on the PC.
+  const scope = sha256(JSON.stringify([subject.email.toLowerCase(), subject.clientId, header]));
+  return handleMcpRequest(request, geminiMcpOptions(options, request.signal, { sessionId, scope }));
 }
 
-function geminiMcpOptions(options: RelayHttpOptions) {
+function geminiMcpOptions(options: RelayHttpOptions, signal: AbortSignal, session?: { sessionId: string; scope: string }) {
+  const codeOwner = options.enableCodeMode ? session?.scope : undefined;
   const backend: MachineBackend = {
     mode: "relay",
     listMachines: () => options.bridge.listMachines(),
-    call: (machine, op, params, timeoutMs) => options.bridge.call(machine, op, params, timeoutMs),
+    call: (machine, op, params, timeoutMs, signal) => options.bridge.call(
+      machine, op, { ...(params as Record<string, unknown>), sessionScope: session?.scope }, timeoutMs, signal,
+    ),
   };
   return {
     backend,
-    maxSyncWaitMs: clamp(options.maxSyncWaitMs),
     checkOrigin: false,
-    tools: SHELL_TOOLS,
+    tools: codeOwner ? [...SHELL_TOOLS, ...CODE_TOOLS] : SHELL_TOOLS,
     preserveToolResults: true,
     disableSse: true,
-    callTool: (name: string, args: unknown) => callShellTool(backend, name, args, { maxSyncWaitMs: clamp(options.maxSyncWaitMs) }),
+    sessionId: session?.sessionId,
+    callTool: (name: string, args: unknown) => callShellTool(backend, name, args, {
+      ...(options.maxSyncWaitMs === undefined ? {} : { maxSyncWaitMs: options.maxSyncWaitMs }),
+      ...(codeOwner === undefined ? {} : { codeOwner }),
+      signal,
+    }),
     serverName: SHELL_SERVER_NAME,
     serverVersion: SHELL_SERVER_VERSION,
     instructions: SHELL_INSTRUCTIONS,

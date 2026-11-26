@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 import { ToolError, type PathPlatform } from "grokcode-shared";
 
@@ -34,58 +35,145 @@ export function confineFile(input: string, ctx: FileContext, cwd: string | undef
   });
 }
 
-export function readFile(input: string, ctx: FileContext, offset = 0, maxBytes?: number, lines?: { start: number; end?: number }, sourceRedaction = true): { path: string; content: string; bytes: number; nextOffset: number; truncated: boolean } {
-  const file = confineFile(input, ctx, undefined, false, true);
-  const st = fs.lstatSync(file);
-  if (st.isSymbolicLink() || !st.isFile()) throw new ToolError("path is not a regular file.", "invalid_path");
-  const cap = Math.min(maxBytes ?? 32_768, ctx.policy.limits.maxReadBytes);
-  const fd = fs.openSync(file, "r");
+export const READ_PAGE_BYTES = 46_000;
+const READ_PAGE_LINES = 800;
+
+export interface ReadPageOptions {
+  offset?: number | undefined;
+  maxBytes?: number | undefined;
+  startLine?: number | undefined;
+  endLine?: number | undefined;
+}
+
+export function readFilePage(input: string, ctx: FileContext, options: ReadPageOptions, signal?: AbortSignal) {
+  const file = regularFile(input, ctx);
+  return readPage(file, ctx.policy.limits.maxReadBytes, options, false, signal);
+}
+
+/** The caller authorizes the generated path. Do not pass a client-supplied path here. */
+export async function readPage(file: string, maxReadBytes: number, options: ReadPageOptions, alreadyRedacted = false, signal?: AbortSignal) {
+  const expected = fs.lstatSync(file);
+  if (!expected.isFile() || (alreadyRedacted && expected.nlink !== 1)) {
+    throw new ToolError("path is not a regular file.", "invalid_path");
+  }
+  const fd = await fs.promises.open(file, "r");
   try {
-    const size = fs.fstatSync(fd).size;
-    const start = lines ? lineOffset(fd, size, lines.start) : Math.min(size, Math.max(0, offset));
-    const length = Math.min(cap, Math.max(0, size - start));
-    const buffer = Buffer.alloc(length);
-    let read = length === 0 ? 0 : fs.readSync(fd, buffer, 0, length, start);
-    let end = size;
-    if (lines?.end !== undefined) {
-      let remaining = lines.end - lines.start + 1;
-      for (let i = 0; i < read; i++) {
-        if (buffer[i] === 10 && --remaining === 0) {
-          read = i + 1;
-          end = start + read;
-          break;
-        }
+    const stat = await fd.stat();
+    if (!stat.isFile() || stat.ino !== expected.ino || stat.dev !== expected.dev) {
+      throw new ToolError("path changed before the read.", "file_changed");
+    }
+    const totalBytes = stat.size;
+    const requested = Math.min(options.offset ?? 0, totalBytes);
+    const first = options.startLine ?? 1;
+    let rangeStart = first === 1 ? 0 : totalBytes;
+    let rangeEnd = totalBytes;
+    let offsetLine = 1;
+    let breaks = 0;
+    let lastByte: number | undefined;
+    const chunk = Buffer.alloc(64 * 1024);
+    for (let position = 0; position < totalBytes;) {
+      signal?.throwIfAborted();
+      const { bytesRead: count } = await fd.read(chunk, 0, Math.min(chunk.length, totalBytes - position), position);
+      if (count === 0) throw new ToolError("The file changed during the read. Start again.", "file_changed");
+      const data = chunk.subarray(0, count);
+      lastByte = data[count - 1];
+      for (let i = data.indexOf(10); i !== -1; i = data.indexOf(10, i + 1)) {
+        const after = position + i + 1;
+        breaks++;
+        if (breaks + 1 === first) rangeStart = after;
+        if (breaks === options.endLine) rangeEnd = after;
+        if (after <= requested) offsetLine++;
+      }
+      position += count;
+    }
+    const totalLines = breaks + (totalBytes > 0 && lastByte !== 10 ? 1 : 0);
+    const start = options.offset === undefined ? rangeStart : requested;
+    if (start < rangeStart || start > rangeEnd) {
+      throw new ToolError("offset is outside the requested line range.", "invalid_argument");
+    }
+    const cap = Math.min(options.maxBytes ?? READ_PAGE_BYTES, READ_PAGE_BYTES, maxReadBytes);
+    const available = Math.min(cap + 1, rangeEnd - start);
+    const buffer = Buffer.alloc(available);
+    let filled = 0;
+    while (filled < available) {
+      signal?.throwIfAborted();
+      const { bytesRead: count } = await fd.read(buffer, filled, available - filled, start + filled);
+      if (count === 0) throw new ToolError("The file changed during the read. Start again.", "file_changed");
+      filled += count;
+    }
+    if (available > 0 && isUtf8Continuation(buffer[0]!)) {
+      throw new ToolError("offset must be on a UTF-8 character boundary.", "invalid_argument");
+    }
+    let bytes = Math.min(cap, available);
+    const startLine = bytes === 0 ? null : options.offset === undefined ? first : offsetLine;
+    let pageBreaks = 0;
+    for (let i = buffer.indexOf(10); i !== -1 && i < bytes; i = buffer.indexOf(10, i + 1)) {
+      if (++pageBreaks === READ_PAGE_LINES) {
+        bytes = i + 1;
+        break;
       }
     }
-    // Leave an incomplete UTF-8 character for the next page when it fits the window.
-    if (read > 0 && start + read < end) {
-      let lead = read - 1;
-      while (lead > 0 && (buffer[lead]! & 0xc0) === 0x80) lead--;
-      const byte = buffer[lead]!;
-      const width = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
-      if (lead > 0 && read - lead < width) read = lead;
+    while (bytes > 0 && bytes < available && isUtf8Continuation(buffer[bytes]!)) bytes--;
+    if (bytes === 0 && available > 0) {
+      throw new ToolError("maxBytes is too small for the next UTF-8 character.", "invalid_argument");
     }
-    const sourceCode = /\.(?:[cm]?[jt]sx?|py|go|rs|sh|bash|zsh|fish|ps1|rb|php|java|kt|swift|c|h|cpp|cs|lua)$/i.test(file);
-    const content = redact(buffer.subarray(0, read).toString("utf8"), sourceRedaction && sourceCode);
-    return { path: file, content, bytes: read, nextOffset: start + read, truncated: start + read < end };
+    const endLine = startLine === null ? null : startLine + pageBreaks - (buffer[bytes - 1] === 10 ? 1 : 0);
+    const nextOffset = start + bytes;
+    const hasMore = nextOffset < rangeEnd;
+    const current = await fd.stat();
+    signal?.throwIfAborted();
+    if (current.size !== totalBytes || current.mtimeMs !== stat.mtimeMs || current.ctimeMs !== stat.ctimeMs) {
+      throw new ToolError("The file changed during the read. Start again.", "file_changed");
+    }
+    const content = buffer.subarray(0, bytes).toString("utf8");
+    return {
+      path: file,
+      content: alreadyRedacted ? content : redact(content, isSourceFile(file)),
+      bytes,
+      nextOffset,
+      truncated: hasMore,
+      hasMore,
+      startLine,
+      endLine,
+      totalLines,
+      totalBytes,
+    };
   } finally {
-    fs.closeSync(fd);
+    await fd.close();
   }
 }
 
-function lineOffset(fd: number, size: number, line: number): number {
-  const chunk = Buffer.alloc(32_768);
-  let offset = 0;
-  while (line > 1 && offset < size) {
-    if (offset >= 50_000_000) throw new ToolError("line starts beyond the scan limit.", "too_large");
-    const length = fs.readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
-    if (length === 0) break;
-    for (let i = 0; i < length; i++) {
-      if (chunk[i] === 10 && --line === 1) return offset + i + 1;
-    }
-    offset += length;
+function isUtf8Continuation(byte: number): boolean {
+  return (byte & 0xc0) === 0x80;
+}
+
+function regularFile(input: string, ctx: FileContext): string {
+  const file = confineFile(input, ctx, undefined, false, true);
+  const st = fs.lstatSync(file);
+  if (st.isSymbolicLink() || !st.isFile()) throw new ToolError("path is not a regular file.", "invalid_path");
+  return file;
+}
+
+function isSourceFile(file: string): boolean {
+  return /\.(?:[cm]?[jt]sx?|py|go|rs|sh|bash|zsh|fish|ps1|rb|php|java|kt|swift|c|h|cpp|cs|lua)$/i.test(file);
+}
+
+export function readGuidanceFile(input: string, ctx: FileContext, maxBytes: number): { content: string; truncated: boolean } {
+  const file = regularFile(input, ctx);
+  const cap = Math.min(maxBytes, ctx.policy.limits.maxReadBytes);
+  const fd = fs.openSync(file, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(cap, size);
+    const buffer = Buffer.alloc(length);
+    const read = length === 0 ? 0 : fs.readSync(fd, buffer, 0, length, 0);
+    const truncated = read < size;
+    const data = buffer.subarray(0, read);
+    const text = truncated ? new StringDecoder("utf8").write(data) : data.toString("utf8");
+    return { content: redact(text), truncated };
+  } finally {
+    fs.closeSync(fd);
   }
-  return offset;
 }
 
 export function listDir(input: string, ctx: FileContext): { path: string; entries: Array<{ name: string; type: "file" | "dir" | "symlink" | "other" }>; truncated: boolean } {
@@ -111,7 +199,7 @@ function isGitSegment(part: string, platform: PathPlatform): boolean {
   return platform === "win32" ? part.toLowerCase() === ".git" : part === ".git";
 }
 
-export function writeFile(input: string, contents: string, ctx: FileContext): { path: string; bytes: number } {
+export function writeFile(input: string, contents: string, ctx: FileContext, expected?: fs.Stats): { path: string; bytes: number } {
   if (typeof contents !== "string") throw new ToolError("contents must be a string.", "invalid_argument");
   const segments = input.split(/[\\/]/).filter(Boolean);
   if (segments.some((part) => isGitSegment(part, ctx.platform)) || (isGitdirPointer(contents) && isGitSegment(segments.at(-1) ?? "", ctx.platform))) {
@@ -127,9 +215,30 @@ export function writeFile(input: string, contents: string, ctx: FileContext): { 
   confineFile(parent, ctx, undefined, true, true);
   fs.mkdirSync(parent, { recursive: true });
   const tmp = path.join(parent, `.grokcode-${randomBytes(8).toString("hex")}.tmp`);
-  fs.writeFileSync(tmp, Buffer.from(contents, "utf8"));
-  fs.renameSync(tmp, file);
+  const fd = fs.openSync(tmp, "wx", expected ? expected.mode & 0o777 : 0o666);
+  let renamed = false;
+  try {
+    try {
+      fs.writeFileSync(fd, contents, "utf8");
+      if (expected) fs.fchmodSync(fd, expected.mode & 0o7777);
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (expected) assertUnchanged(expected, fs.lstatSync(file, { throwIfNoEntry: false }));
+    fs.renameSync(tmp, file);
+    renamed = true;
+  } finally {
+    if (!renamed) fs.rmSync(tmp, { force: true });
+  }
   return { path: file, bytes };
+}
+
+export function assertUnchanged(expected: fs.Stats, actual: fs.Stats | undefined): void {
+  if (!actual?.isFile() || expected.dev !== actual.dev || expected.ino !== actual.ino ||
+      expected.size !== actual.size || expected.mtimeMs !== actual.mtimeMs ||
+      expected.ctimeMs !== actual.ctimeMs || expected.mode !== actual.mode) {
+    throw new ToolError("The file changed during the edit. Read it again before retrying.", "file_changed");
+  }
 }
 
 export function removeFile(input: string, ctx: FileContext): void {

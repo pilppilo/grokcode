@@ -1,20 +1,15 @@
 import {
-  DEFAULT_SYNC_WAIT_MS,
-  MAX_SYNC_WAIT_MS,
   ToolError,
   errorCode,
-  type Clock,
   type MachineBackend,
 } from "grokcode-shared";
 
 import { SHELL_INSTRUCTIONS, SHELL_SERVER_NAME, SHELL_SERVER_VERSION, SHELL_TOOLS } from "./tools.js";
+import { MAX_JOB_HOLD_MS } from "./hold.js";
+import { CODE_TOOLS } from "./code-tools.js";
 
 export { SHELL_INSTRUCTIONS, SHELL_SERVER_NAME, SHELL_SERVER_VERSION, SHELL_TOOLS };
-
-const realClock: Clock = {
-  now: () => Date.now(),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-};
+export { CODE_TOOLS };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -35,24 +30,15 @@ async function resolveMachine(backend: MachineBackend, requested: unknown): Prom
   throw new ToolError(`machine is required. Online: ${online.join(", ") || "(none)"}`, "machine_required");
 }
 
-function clampWait(requested: unknown, maxSyncWaitMs: number): number {
-  const max = Math.min(Math.max(0, maxSyncWaitMs), MAX_SYNC_WAIT_MS);
-  if (typeof requested !== "number" || !Number.isFinite(requested)) return Math.min(DEFAULT_SYNC_WAIT_MS, max);
-  return Math.max(0, Math.min(requested, max));
-}
-
-/**
- * Dispatch one shell-bridge tool. Long commands are admitted and then polled,
- * matching the OpenCode send_prompt pattern, so a Gemini or Cloudflare timeout
- * does not have to cover the whole process.
- */
 export async function callShellTool(
   backend: MachineBackend,
   name: string,
   args: unknown,
-  options: { maxSyncWaitMs?: number; clock?: Clock } = {},
+  options: { maxSyncWaitMs?: number; signal?: AbortSignal; codeOwner?: string } = {},
 ): Promise<unknown> {
-  const tool = SHELL_TOOLS.find((item) => item.name === name);
+  options.signal?.throwIfAborted();
+  const codeTool = options.codeOwner ? CODE_TOOLS.find((item) => item.name === name) : undefined;
+  const tool = codeTool ?? SHELL_TOOLS.find((item) => item.name === name);
   if (!tool) throw new ToolError(`Unknown tool ${name}.`, "unknown_tool");
   const record = isRecord(args) ? { ...args } : {};
   if (name === "list_machines") {
@@ -69,52 +55,60 @@ export async function callShellTool(
     };
   }
   const machine = await resolveMachine(backend, record.machine);
+  options.signal?.throwIfAborted();
   delete record.machine;
+  delete record.sessionScope;
+  const configured = options.maxSyncWaitMs;
+  const holdMs = configured !== undefined && Number.isFinite(configured)
+    ? Math.trunc(Math.min(MAX_JOB_HOLD_MS, Math.max(0, configured)))
+    : MAX_JOB_HOLD_MS;
+  const holdTimeout = holdMs + 5_000;
+  if (codeTool?.op) {
+    const params = {
+      owner: options.codeOwner,
+      ...(name === "execute" ? { code: record.code } : { executionId: record.executionId }),
+      holdMs: record.wait === false ? 0 : holdMs,
+    };
+    const result = await backend.call(machine, codeTool.op, params, holdTimeout, options.signal);
+    return isRecord(result) ? { ...result, machine } : result;
+  }
   if (name === "run_command" || name === "run_tests") {
     const wait = record.wait !== false;
     delete record.wait;
-    const budget = clampWait(record.timeoutMs, options.maxSyncWaitMs ?? DEFAULT_SYNC_WAIT_MS);
-    const clock = options.clock ?? realClock;
-    const deadline = clock.now() + budget;
-    const started = await backend.call(machine, name === "run_tests" ? "shell_run_tests" : "shell_run", record, 20_000);
+    const deadline = Date.now() + holdMs;
+    const started = await backend.call(machine, name === "run_tests" ? "shell_run_tests" : "shell_run", record, 20_000, options.signal);
     if (!wait) return started;
-    const jobId = isRecord(started) && typeof started.jobId === "string" ? started.jobId : undefined;
-    if (!jobId || (isRecord(started) && started.status !== "running")) return started;
-    const guidance = isRecord(started) && started.guidance !== undefined ? { guidance: started.guidance } : {};
+    if (!isRecord(started) || typeof started.jobId !== "string" || started.status !== "running") return started;
+    const { jobId } = started;
+    const guidance = started.guidance === undefined ? {} : { guidance: started.guidance };
     let last: unknown = started;
-    while (clock.now() < deadline) {
-      const remainingBeforePoll = deadline - clock.now();
-      if (remainingBeforePoll <= 0) break;
+    const remaining = Math.max(0, Math.min(holdMs, deadline - Date.now()));
+    if (remaining > 0) {
+      options.signal?.throwIfAborted();
       try {
-        last = await backend.call(machine, "shell_job", { jobId }, Math.min(15_000, remainingBeforePoll));
+        last = await backend.call(machine, "shell_job", { jobId, holdMs: remaining }, remaining + 5_000, options.signal);
       } catch (error) {
         if (errorCode(error) !== "timeout") throw error;
-        break;
       }
-      const status = isRecord(last) ? last.status : undefined;
-      if (status && status !== "running") {
-        if (name === "run_tests" && isRecord(last)) {
-          return { ...last, ...guidance, passed: status === "exited" && last.exitCode === 0 };
-        }
-        return isRecord(last) ? { ...last, ...guidance } : last;
+      if (isRecord(last) && typeof last.status === "string" && last.status !== "running") {
+        const testResult = name === "run_tests" ? { passed: last.status === "exited" && last.exitCode === 0 } : {};
+        return { ...last, ...guidance, ...testResult };
       }
-      const remaining = deadline - clock.now();
-      if (remaining <= 0) break;
-      await clock.sleep(Math.min(400, remaining));
-      if (clock.now() >= deadline) break;
     }
     return {
+      ...started,
       ...(isRecord(last) ? last : {}),
       ...guidance,
       status: "running",
       jobId,
-      hint: "The sync budget ended before the command exited. Poll get_job or poll_output.",
+      hint: "The command is still running. Use get_job to wait or poll_output to read available output.",
     };
   }
+  if (name === "get_job") record.holdMs = record.wait === false ? 0 : holdMs;
   if (name === "poll_output") record.view = "poll";
   if (!tool.op) throw new ToolError(`Tool ${name} has no op.`, "unknown_tool");
-  const timeout = name === "git_commit_push" ? 90_000 : 20_000;
-  const result = await backend.call(machine, tool.op, record, timeout);
+  const timeout = name === "git_commit_push" ? 90_000 : name === "get_job" ? holdTimeout : 20_000;
+  const result = await backend.call(machine, tool.op, record, timeout, options.signal);
   if (name === "git_commit_push") {
     const failure = commitPushFailure(result);
     // isError stays false for a clean commit. A push that fails after the

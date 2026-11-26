@@ -50,6 +50,7 @@ async function runGit(
     maxOutput: number;
     spawnImpl?: SpawnFn;
     allowlist: boolean;
+    verifyRepo?: boolean;
   },
 ) {
   if (options.allowlist) {
@@ -60,6 +61,7 @@ async function runGit(
     });
     if (!decision.allow) throw new ToolError(decision.reason, "policy_denied");
   }
+  if (options.verifyRepo) await assertProjectRepo(options.cwd, options.ctx, options.spawnImpl);
   const extraConfig = await filterDisableArgs(binary, options.cwd, options.ctx, options.spawnImpl);
   return runAndWait(
     {
@@ -138,9 +140,10 @@ export async function wrapGitCommand(
 export async function assertProjectRepo(cwd: string, ctx: FileContext, spawnImpl?: SpawnFn): Promise<void> {
   const binary = gitBinary(ctx, spawnImpl);
   const results = await Promise.all(["--show-toplevel", "--absolute-git-dir", "--git-common-dir"].map(
-    (flag) => runGit(binary, ["rev-parse", "--path-format=absolute", flag], {
-      cwd, ctx, timeoutMs: 5_000, maxOutput: 4096, spawnImpl, allowlist: false,
-    }),
+    (flag) => runAndWait({
+      argv: [binary, ...gitSafetyArgs(ctx.platform), "rev-parse", "--path-format=absolute", flag],
+      cwd, platform: ctx.platform, shell: false, env: gitEnv(ctx.platform), roots: ctx.policy.roots,
+    }, 5_000, 4096, spawnImpl),
   ));
   for (const result of results) {
     if (result.code !== 0 || result.truncated) throw new ToolError("Cannot locate the project repository.", "git_failed");
@@ -178,6 +181,7 @@ export async function gitStatus(cwd: string, ctx: FileContext, spawnImpl?: Spawn
     maxOutput: ctx.policy.limits.maxOutputBytes,
     spawnImpl,
     allowlist: true,
+    verifyRepo: true,
   });
   if (result.timedOut) throw new ToolError("git status timed out.", "timeout");
   if (result.code !== 0) throw new ToolError(redact(result.output).trim() || "git status failed.", "git_failed");
@@ -276,6 +280,7 @@ export async function gitCommit(
     const abs = path.resolve(cwd, rel);
     if (isSensitivePath(abs, platform)) throw new ToolError("that path cannot be committed.", "path_denied");
   }
+  await assertProjectRepo(cwd, ctx, spawnImpl);
   const binary = gitBinary(ctx, spawnImpl);
   const branchResult = await runGit(binary, ["symbolic-ref", "--short", "HEAD"], {
     cwd,

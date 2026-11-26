@@ -10,7 +10,7 @@ import { ToolError } from "grokcode-shared";
 
 import { createShellRuntime, parsePolicy } from "../src/index.ts";
 import type { Policy } from "../src/policy.ts";
-import type { SpawnFn } from "../src/spawn.ts";
+import { defaultSpawn, type SpawnFn } from "../src/spawn.ts";
 import { handleStdioMessage, localBackend } from "../src/stdio.ts";
 
 function runtimeFor(root: string, policy: Policy, auditPath?: string) {
@@ -38,9 +38,11 @@ function basePolicy(root: string, allow: Policy["allow"], git?: Policy["git"]): 
 }
 
 test("run_command admit-then-poll runs echo and redacts secrets", async () => {
-  const root = mkdtempSync(path.join(tmpdir(), "grokcode-shell-"));
-  const auditPath = path.join(root, "audit.log");
+  const temp = mkdtempSync(path.join(tmpdir(), "grokcode-shell-"));
+  const root = path.join(temp, "workspace");
+  const auditPath = path.join(temp, "audit.log");
   try {
+    mkdirSync(root);
     const runtime = runtimeFor(root, basePolicy(root, [{ command: "echo" }]), auditPath);
     const started = (await runtime.execute("shell_run", {
       argv: ["echo", "hello ghp_abcdefghijklmnopqrstuvwxyz123456"],
@@ -71,7 +73,53 @@ test("run_command admit-then-poll runs echo and redacts secrets", async () => {
     assert.match(audit, /"decision":"allow"/);
     assert.equal(audit.includes("ghp_"), false);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("send_input requires live policy and audits without recording input", async () => {
+  const temp = mkdtempSync(path.join(tmpdir(), "grokcode-stdin-"));
+  const root = path.join(temp, "workspace");
+  mkdirSync(root);
+  const auditPath = path.join(temp, "audit.log");
+  const platform = process.platform === "win32" ? "win32" : "posix";
+  let allowJobInput = false;
+  const runtime = createShellRuntime({
+    platform, home: temp, auditPath,
+    loadPolicy: () => ({
+      source: "test",
+      policy: parsePolicy(JSON.stringify({
+        version: 1, roots: [root], allowJobInput,
+        allow: [{ command: "echo" }],
+      }), platform, temp),
+    }),
+    spawnImpl: (spec) => defaultSpawn({
+      ...spec,
+      roots: [],
+      argv: [process.execPath, "-e", "process.stdin.once('data', b => { process.stdout.write(b.toString('hex') + String.fromCharCode(10), () => process.exit(0)); });"],
+    }),
+  });
+  const params = { cwd: root, argv: ["echo"], stdin: true };
+  try {
+    await assert.rejects(runtime.execute("shell_run", params), { code: "policy_denied" });
+    allowJobInput = true;
+    const { jobId } = await runtime.execute("shell_run", params) as { jobId: string };
+    const input = "private reply\n";
+    allowJobInput = false;
+    await assert.rejects(runtime.execute("shell_send_input", { jobId, input }), { code: "policy_denied" });
+    allowJobInput = true;
+    assert.deepEqual(await runtime.execute("shell_send_input", { jobId, input }), { jobId });
+    const result = await runtime.execute("shell_job", { jobId, holdMs: 5000 }) as { output: string; status: string };
+    assert.equal(result.status, "exited");
+    assert.equal(result.output.trim(), Buffer.from(input).toString("hex"));
+    await assert.rejects(runtime.execute("shell_send_input", { jobId, input }), { code: "input_unavailable" });
+    const audit = readFileSync(auditPath, "utf8");
+    assert.match(audit, /"tool":"shell_send_input","decision":"allow"/);
+    assert.match(audit, /"tool":"shell_send_input","decision":"deny"/);
+    assert.ok(!audit.includes("private reply"));
+  } finally {
+    runtime.killAll();
+    rmSync(temp, { recursive: true, force: true });
   }
 });
 
@@ -300,6 +348,45 @@ function scriptedGit(respond: (argv: readonly string[]) => { code?: number; stdo
   };
 }
 
+test("git status and commit require the enclosing repository to be allowed", async () => {
+  if (!gitAvailable()) return;
+  const root = mkdtempSync(path.join(tmpdir(), "grokcode-git-root-"));
+  try {
+    initRepo(root, "main");
+    const cwd = path.join(root, "allowed");
+    mkdirSync(cwd);
+    writeFileSync(path.join(cwd, "note.txt"), "hello");
+    const platform = process.platform === "win32" ? "win32" : "posix";
+    const runtime = (allowed: string) => createShellRuntime({
+      platform,
+      home: root,
+      loadPolicy: () => ({
+        policy: parsePolicy(JSON.stringify({
+          version: 1,
+          roots: [allowed],
+          allow: [{ command: "git", subcommands: ["status"] }],
+          git: { branches: ["main"], push: false },
+        }), platform, root),
+        source: "test",
+      }),
+    });
+    const commit = { cwd, message: "add note", paths: ["note.txt"] };
+    const denied = (error: unknown) => error instanceof ToolError && error.code === "path_denied";
+    const restricted = runtime(cwd);
+    await assert.rejects(restricted.execute("shell_git_status", { cwd }), denied);
+    await assert.rejects(restricted.execute("shell_git_commit", commit), denied);
+    assert.equal(execFileSync("git", ["ls-files"], { cwd: root, encoding: "utf8" }), "");
+
+    const permitted = runtime(root);
+    const status = await permitted.execute("shell_git_status", { cwd }) as { output: string };
+    assert.match(status.output, /note\.txt|allowed\//);
+    const result = await permitted.execute("shell_git_commit", commit) as { sha: string };
+    assert.match(result.sha, /^[a-f0-9]{40}$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("push true is denied before git add when policy git.push is false", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "grokcode-push-deny-"));
   const seen: string[] = [];
@@ -311,6 +398,7 @@ test("push true is denied before git add when policy git.push is false", async (
       source: "test",
     }),
     spawnImpl: scriptedGit((argv) => {
+      if (argv.includes("--path-format=absolute")) return { stdout: `${root}\n` };
       for (const name of ["symbolic-ref", "add", "commit", "push", "rev-parse"]) {
         if (argv.includes(name)) seen.push(name);
       }
@@ -372,6 +460,7 @@ test("a failed push after a commit returns the SHA instead of throwing", async (
       source: "test",
     }),
     spawnImpl: scriptedGit((argv) => {
+      if (argv.includes("--path-format=absolute")) return { stdout: `${root}\n` };
       if (argv.includes("symbolic-ref")) return { stdout: "main\n" };
       if (argv.includes("rev-parse")) return { stdout: `${sha}\n` };
       if (argv.includes("push")) return { code: 1, stderr: "fatal: origin unreachable\n" };
@@ -504,11 +593,13 @@ test("file search skips hidden and sensitive paths and returns line numbers", as
 
 test("a running job can be cancelled repeatedly", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "grokcode-cancel-"));
+  const platform = process.platform === "win32" ? "win32" : "posix";
+  const policy = parsePolicy(JSON.stringify({ version: 1, roots: [root], allow: [{ command: "echo" }] }), platform, root);
   let kills = 0;
   const runtime = createShellRuntime({
-    platform: "posix",
+    platform,
     home: root,
-    loadPolicy: () => ({ policy: basePolicy(root, [{ command: "echo" }]), source: "(test)" }),
+    loadPolicy: () => ({ policy, source: "(test)" }),
     spawnImpl: () => ({
       stdout: null,
       stderr: null,

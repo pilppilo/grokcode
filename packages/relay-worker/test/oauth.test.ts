@@ -59,6 +59,40 @@ test("PKCE S256 matches the RFC 7636 vector", () => {
   assert.equal(pkceS256(VERIFIER), CHALLENGE);
 });
 
+test("owner approval caps concurrent guesses and unlocks after an hour", async () => {
+  const { config, advance } = setup();
+  const client = await register(config);
+  const begin = async () => {
+    const url = new URL("https://relay.example/oauth/authorize");
+    url.search = new URLSearchParams({
+      response_type: "code", client_id: client.client_id, redirect_uri: REDIRECT,
+      state: "test", code_challenge: CHALLENGE, code_challenge_method: "S256",
+    }).toString();
+    const response = await handleOAuthRequest(new Request(url), config);
+    const txn = /name="txn" value="([^"]+)"/.exec(await response.text())?.[1];
+    assert.ok(txn);
+    return txn;
+  };
+  const approve = (txn: string, secret: string) => handleOAuthRequest(
+    new Request("https://relay.example/oauth/authorize", { method: "POST", body: new URLSearchParams({ txn, secret }) }),
+    config,
+  );
+  const approved = await begin();
+  const first = await Promise.all([approve(approved, SECRET), approve(approved, SECRET)]);
+  assert.deepEqual(first.map((response) => response.status).sort(), [302, 400]);
+  assert.ok(new URL(first.find((response) => response.status === 302)!.headers.get("location")!).searchParams.get("code"));
+
+  const expired = await begin();
+  const guesses = await Promise.all(Array.from({ length: 4 }, () => approve(expired, "wrong")));
+  assert.deepEqual(guesses.map((response) => response.status).sort(), [400, 403, 403, 403]);
+  assert.equal((await approve(expired, SECRET)).status, 400);
+
+  for (let i = 0; i < 7; i++) assert.equal((await approve(await begin(), "wrong")).status, 403);
+  assert.equal((await approve(await begin(), SECRET)).status, 429);
+  advance(60 * 60 * 1000);
+  assert.equal((await approve(await begin(), SECRET)).status, 302);
+});
+
 test("metadata, dynamic registration, approval, and token checks", async () => {
   const { config, advance } = setup();
   const metadata = await handleOAuthRequest(new Request("https://relay.example/.well-known/oauth-authorization-server"), config);
@@ -543,10 +577,10 @@ test("empty scope is accepted, registration reports the client TTL, and OPTIONS 
   assert.equal(page.status, 200);
 });
 
-test("dynamic registration is capped", async () => {
-  const { config } = setup({ registrationQuota: 1 });
-  await register(config);
-  const second = await handleOAuthRequest(
+test("dynamic registration caps concurrent requests and frees expired slots", async () => {
+  const { config, store, advance } = setup({ registrationQuota: 1 });
+  await store.put("dcr:count", "50");
+  const attempt = () => handleOAuthRequest(
     new Request("https://relay.example/oauth/register", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -554,7 +588,10 @@ test("dynamic registration is capped", async () => {
     }),
     config,
   );
-  assert.equal(second.status, 429);
+  const responses = await Promise.all([attempt(), attempt(), attempt()]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [201, 429, 429]);
+  advance(90 * 24 * 60 * 60 * 1000);
+  assert.equal((await attempt()).status, 201);
 });
 
 test("loopback registration and existing loopback clients require configured redirect pins", async () => {
