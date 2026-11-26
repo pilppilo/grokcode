@@ -16,7 +16,7 @@ const SUPPORTED_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18", "
 export interface MachineBackend {
   mode: "relay" | "direct";
   listMachines(): Promise<MachineInfo[]>;
-  call(machine: string, op: string, params: unknown, timeoutMs?: number): Promise<unknown>;
+  call(machine: string, op: string, params: unknown, timeoutMs?: number, signal?: AbortSignal): Promise<unknown>;
 }
 
 export interface Clock {
@@ -46,6 +46,8 @@ export interface McpHandlerOptions {
   preserveToolResults?: boolean;
   /** Return 405 for GET when the endpoint has no server-initiated messages. */
   disableSse?: boolean;
+  /** Optional soft session to return on successful initialization. */
+  sessionId?: string;
 }
 
 const DEFAULT_INSTRUCTIONS = [
@@ -89,13 +91,17 @@ function rpcError(id: unknown, code: number, message: string): unknown {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
 
+export function toolResultText(payload: unknown): string {
+  return typeof payload === "string" ? payload : JSON.stringify(payload, null, 2) ?? "";
+}
+
 function toolResult(payload: unknown, isError = false, preserve = false): { content: { type: "text"; text: string }[]; isError: boolean } {
-  const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  const text = toolResultText(payload);
   return { content: [{ type: "text", text: preserve ? text : truncate(text) }], isError };
 }
 
 /** Tool failures keep their code and message, plus any structured details (for example a commit SHA). */
-function toolErrorPayload(err: unknown): Record<string, unknown> {
+export function toolErrorPayload(err: unknown): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     error: errorCode(err),
     message: errorMessage(err),
@@ -415,7 +421,12 @@ export async function handleMcpRequest(request: Request, options: McpHandlerOpti
     return withCors(request, new Response(null, { status: 202 }));
   }
   const body = Array.isArray(payload) ? responses : responses[0];
-  return withCors(request, json(body));
+  const initialized = messages.some((message) =>
+    message.jsonrpc === "2.0" && message.method === "initialize" && message.id !== undefined);
+  return withCors(request, json(body, 200, initialized && options.sessionId ? {
+    "mcp-session-id": options.sessionId,
+    "access-control-expose-headers": "Mcp-Session-Id",
+  } : undefined));
 }
 
 function corsHeaders(request: Request): Headers {

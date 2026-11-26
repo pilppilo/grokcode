@@ -153,3 +153,27 @@ test("reconnecting releases each session's abort listener on close and error", a
     assert.equal(getEventListeners(signal, "abort").length, baseline);
   }
 });
+
+test("disconnect aborts an in-flight job hold without writing to the closed socket", async () => {
+  const socket = new FakeSocket();
+  let holdSignal: AbortSignal | undefined;
+  const done = runRelayConnection({
+    url: "ws://relay.example/agent",
+    name: "laptop",
+    token: "machine-token-0123456789abcd",
+    signal: new AbortController().signal,
+    connect: () => socket,
+    execute: (_op, _params, signal) => {
+      holdSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  });
+  socket.emit("message", encodeMessage({ type: "rpc", id: "held", op: "shell_job", params: { holdMs: 45_000 } }));
+  assert.equal(holdSignal?.aborted, false);
+  socket.close();
+  await done;
+  assert.equal(holdSignal?.aborted, true);
+  assert.deepEqual(socket.sent, []);
+});

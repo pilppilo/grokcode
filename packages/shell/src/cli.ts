@@ -98,6 +98,7 @@ export async function runStdio(argv: string[], env: NodeJS.ProcessEnv, io: Stdio
     loadPolicy: () => policyFromFile(policyPath, platform, home),
     auditPath,
     taskDir: path.join(path.dirname(policyPath), "shell-tasks"),
+    outputDir: path.join(path.dirname(policyPath), "outputs"),
     protectedPaths: [policyPath, auditPath],
   });
   const backend = localBackend(name, runtime);

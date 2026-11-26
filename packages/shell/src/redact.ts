@@ -10,7 +10,7 @@ const RULES: Array<[RegExp, string]> = [
   [/\bsk_live_[A-Za-z0-9]{10,}/g, "[REDACTED-STRIPE]"],
   [/\bAIza[0-9A-Za-z_-]{20,}/g, "[REDACTED-GOOGLE]"],
   [/\bnpm_[A-Za-z0-9]{20,}/g, "[REDACTED-NPM]"],
-  [/([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[REDACTED]@"],
+  [/(?<![a-z0-9+.-])([a-z0-9+.-]+:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[REDACTED]@"],
   [/\b(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)(\s*[=:]\s*['"]?)[^\s'"]{8,}/gi, "$1$2[REDACTED]"],
   [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, "[REDACTED-SLACK]"],
   [/\bsk-ant-[A-Za-z0-9_-]{20,}/g, "[REDACTED-API-KEY]"],

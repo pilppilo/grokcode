@@ -1,17 +1,19 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import path from "node:path";
+import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { HELP, homeFromEnv, loadConfig, parseListen, validateConfig, type AgentConfig } from "./config.js";
+import { HELP, configSources, defaultConfigDir, homeFromEnv, loadConfig, parseListen, validateConfig, type AgentConfig } from "./config.js";
 import { ensureOpenCode } from "./ownership.js";
 import { runRelayConnection } from "./relay.js";
 import { listenDirect } from "./server.js";
 import { createOpenCodeService } from "./service.js";
 import { probeOpenCode } from "./supervisor.js";
 import { detectPlatform, executeOp, isShellOp, type OpenCodeClient } from "grokcode-shared";
-import { createShellRuntime, policyFromFile } from "grokcode-shell";
+import { createShellRuntime, policyFromFile, summarizeAudit } from "grokcode-shell";
 
 const VERSION = "0.1.0";
 
@@ -21,6 +23,27 @@ interface Io {
 }
 
 export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal: AbortSignal): Promise<number> {
+  if (argv[0] === "audit") {
+    try {
+      const { values } = parseArgs({
+        args: argv.slice(1),
+        options: { file: { type: "string" }, help: { type: "boolean" } },
+      });
+      if (values.help) {
+        io.log("grokcode audit [--file <shell-audit.log>]");
+        return 0;
+      }
+      const source = values.file ? undefined : configSources(env, undefined)[0];
+      const directory = source ? path.dirname(source) : defaultConfigDir(env);
+      const file = values.file ?? (directory && path.join(directory, "shell-audit.log"));
+      if (!file) throw new Error("Specify the audit log with --file.");
+      io.log(JSON.stringify(summarizeAudit(file), null, 2));
+      return 0;
+    } catch (error) {
+      io.error(error instanceof Error ? error.message : String(error));
+      return 2;
+    }
+  }
   let config: AgentConfig;
   try {
     config = loadConfig(argv, env);
@@ -85,8 +108,13 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
   const shell = createShellRuntime({
     platform: shellPlatform,
     home: shellHome,
+    enableCodeMode: env.GROKCODE_ENABLE_CODE_MODE === "1",
     loadPolicy: () => policyFromFile(policyPath, shellPlatform, shellHome),
-    ...(config.configDir ? { auditPath: path.join(config.configDir, "shell-audit.log"), taskDir: path.join(config.configDir, "shell-tasks") } : {}),
+    ...(config.configDir ? {
+      auditPath: path.join(config.configDir, "shell-audit.log"),
+      taskDir: path.join(config.configDir, "shell-tasks"),
+      outputDir: path.join(config.configDir, "outputs"),
+    } : {}),
   });
   io.log(
     policyPath
@@ -112,8 +140,8 @@ export async function run(argv: string[], env: NodeJS.ProcessEnv, io: Io, signal
   const stopChild = ensured.stop;
   const getApi = () => service.getClient();
 
-  const execute = async (op: string, params: unknown) => {
-    if (isShellOp(op)) return shell.execute(op, params);
+  const execute = async (op: string, params: unknown, signal?: AbortSignal) => {
+    if (isShellOp(op)) return shell.execute(op, params, signal);
     const shared = {
       allowDirs: config.allowDirs,
       opencodeControl: service.control,
@@ -168,7 +196,7 @@ async function relayLoop(
   url: string,
   name: string,
   token: string,
-  execute: (op: string, params: unknown) => Promise<unknown>,
+  execute: (op: string, params: unknown, signal?: AbortSignal) => Promise<unknown>,
   signal: AbortSignal,
   getApi: () => Promise<OpenCodeClient>,
   io: Io,
@@ -221,7 +249,7 @@ function installSignalHandlers(controller: AbortController): void {
   process.on("SIGTERM", stop);
 }
 
-const invokedDirectly = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+const invokedDirectly = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
 
 if (invokedDirectly) {
   const controller = new AbortController();

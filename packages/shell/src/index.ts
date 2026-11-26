@@ -1,4 +1,4 @@
-export { appendAudit, auditLine, type AuditEvent } from "./audit.js";
+export { appendAudit, auditLine, summarizeAudit, type AuditEvent } from "./audit.js";
 export { commandBase, confine, expandLexical, isBareCommandName, isFsRoot, isSensitivePath, withinRoots } from "./confine.js";
 export { createShellRuntime, policyFromFile, type ShellRuntime, type ShellRuntimeOptions } from "./execute.js";
 export { branchAllowed, evaluateCommand, evaluateShell, parsePolicy, type Decision, type LoadedPolicy, type Policy } from "./policy.js";

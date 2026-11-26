@@ -49,11 +49,11 @@ export function localBackend(name: string, runtime: ShellRuntime): MachineBacken
     async listMachines() {
       return [{ name, connectedAt: started }];
     },
-    async call(machine, op, params) {
+    async call(machine, op, params, _timeoutMs, signal) {
       if (machine !== name) {
         throw new Error(`This process only serves ${name}.`);
       }
-      return runtime.execute(op, params);
+      return runtime.execute(op, params, signal);
     },
   };
 }

@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Per-PC agent that exposes local OpenCode to a Grok Bot MCP client, via the Cloudflare relay or directly.",
   "bin": {
+    "grokcode": "./dist/cli.js",
     "grokcode-agent": "./dist/cli.js"
   },
   "files": [

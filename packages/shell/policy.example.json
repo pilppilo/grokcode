@@ -3,6 +3,7 @@
   "comment": "Copy to ~/.config/grokcode/policy.json (%USERPROFILE%\\.config\\grokcode\\policy.json on Windows) and replace roots with real project directories. Until that file exists, every shell and file call is denied. Keep this file outside the roots so a tool cannot edit its own policy. Run the agent as a normal user.",
   "roots": ["~/src"],
   "allowShell": false,
+  "allowJobInput": false,
   "allowInterpreters": false,
   "allow": [
     {
@@ -21,6 +22,7 @@
   "limits": {
     "timeoutMs": 20000,
     "maxOutputBytes": 200000,
+    "outputPreviewBytes": 10240,
     "maxWriteBytes": 1000000,
     "maxReadBytes": 200000
   }

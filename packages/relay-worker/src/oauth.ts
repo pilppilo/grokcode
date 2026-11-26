@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { MIN_TOKEN_LENGTH, tokensEqual } from "grokcode-shared";
+import { applyApprovalAttempt, type ApprovalAttempt } from "./oauth-approval.js";
 
 /** MCP path Gemini and Antigravity call. OAuth tokens are only valid for this resource. */
 export const GEMINI_MCP_PATH = "/gemini/mcp";
@@ -25,6 +26,9 @@ export interface OAuthStore {
   delete(key: string): Promise<void>;
   /** Delete the key and return its previous value. One atomic step, so two redemptions cannot both succeed. */
   take(key: string): Promise<string | null>;
+  /** Insert a dynamic client only if the active-client quota has room. */
+  registerClient(key: string, value: string, expiresAt: number, quota: number): Promise<boolean>;
+  approveAttempt(key: string, matches: boolean): Promise<ApprovalAttempt>;
 }
 
 export class MemoryOAuthStore implements OAuthStore {
@@ -56,6 +60,26 @@ export class MemoryOAuthStore implements OAuthStore {
     this.rows.delete(key);
     if (row.expiresAt != null && row.expiresAt <= this.now()) return null;
     return row.value;
+  }
+
+  async registerClient(key: string, value: string, expiresAt: number, quota: number): Promise<boolean> {
+    const now = this.now();
+    let active = 0;
+    for (const [key, row] of this.rows) {
+      if (row.expiresAt != null && row.expiresAt <= now) this.rows.delete(key);
+      else if (key.startsWith("client:")) active++;
+    }
+    if (active >= quota || this.rows.has(key)) return false;
+    this.rows.set(key, { value, expiresAt });
+    return true;
+  }
+
+  async approveAttempt(key: string, matches: boolean): Promise<ApprovalAttempt> {
+    return applyApprovalAttempt({
+      get: (key) => this.rows.get(key),
+      put: (key, value, expiresAt) => { this.rows.set(key, { value, expiresAt }); },
+      delete: (key) => { this.rows.delete(key); },
+    }, key, matches, this.now());
   }
 }
 
@@ -409,11 +433,6 @@ function resourceMetadata(runtime: OAuthRuntime): Response {
 async function register(request: Request, runtime: OAuthRuntime): Promise<Response> {
   if (request.method !== "POST") return oauthJson({ error: "invalid_request" }, 405);
   const body = await readJson(request);
-  const countRaw = await runtime.store.get("dcr:count");
-  const count = countRaw ? Number(countRaw) : 0;
-  if (!Number.isFinite(count) || count >= runtime.registrationQuota) {
-    return oauthJson({ error: "invalid_client_metadata", error_description: "dynamic client registration quota exceeded." }, 429);
-  }
   const redirects = stringArray(body.redirect_uris);
   if (redirects.length === 0 || redirects.length > 8 || redirects.some((uri) => !redirectUriAllowed(uri, runtime.pinnedRedirects))) {
     return oauthJson({ error: "invalid_client_metadata", error_description: "redirect_uris are missing or not allowed." }, 400);
@@ -442,8 +461,9 @@ async function register(request: Request, runtime: OAuthRuntime): Promise<Respon
     ...(clientName ? { clientName } : {}),
     expiresAt,
   };
-  await runtime.store.put(`client:${clientId}`, JSON.stringify(stored), expiresAt);
-  await runtime.store.put("dcr:count", String(count + 1));
+  if (!await runtime.store.registerClient(`client:${clientId}`, JSON.stringify(stored), expiresAt, runtime.registrationQuota)) {
+    return oauthJson({ error: "invalid_client_metadata", error_description: "dynamic client registration quota exceeded." }, 429);
+  }
   return oauthJson(
     {
       client_id: clientId,
@@ -519,26 +539,17 @@ async function authorize(request: Request, url: URL, runtime: OAuthRuntime): Pro
 async function approve(request: Request, runtime: OAuthRuntime): Promise<Response> {
   const form = await readForm(request);
   if (form.get("csrf") != null) return submitConsent(runtime, form);
-  if (!runtime.approvalSecret) return html("Owner approval is not configured.", 503);
+  if (!runtime.approvalSecret || runtime.identity) return html("Owner approval is not configured.", 503);
   const txnId = form.get("txn") ?? "";
   const secret = form.get("secret") ?? "";
-  const raw = await runtime.store.get(`txn:${txnId}`);
-  if (!raw) return html("This approval request expired. Start the connection again.", 400);
-  let txn: Txn;
-  try {
-    txn = JSON.parse(raw) as Txn;
-  } catch {
-    return html("This approval request expired. Start the connection again.", 400);
-  }
-  if (txn.expiresAt <= runtime.now()) {
-    await runtime.store.delete(`txn:${txnId}`);
-    return html("This approval request expired. Start the connection again.", 400);
-  }
-  if (!tokensEqual(runtime.approvalSecret, secret)) return html("Approval rejected.", 403);
   const email = runtime.ownerEmails[0];
   if (!email) return html("Set OWNER_EMAILS to use the approval secret.", 503);
-  await runtime.store.delete(`txn:${txnId}`);
-  return finish(runtime, txn, email);
+  if (!/^[A-Za-z0-9_-]{32}$/.test(txnId)) return html("This approval request expired. Start the connection again.", 400);
+  const attempt = await runtime.store.approveAttempt(`txn:${txnId}`, tokensEqual(runtime.approvalSecret, secret));
+  if (attempt.status === "locked") return html("Owner approval is temporarily locked after too many failed attempts.", 429);
+  if (attempt.status === "rejected") return html("Approval rejected.", 403);
+  if (attempt.status !== "approved") return html("This approval request expired. Start the connection again.", 400);
+  return finish(runtime, JSON.parse(attempt.value) as Txn, email);
 }
 
 async function submitConsent(runtime: OAuthRuntime, form: URLSearchParams): Promise<Response> {

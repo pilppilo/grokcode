@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createShellRuntime, parsePolicy } from "../../shell/src/index.ts";
+import type { Spawned } from "../../shell/src/spawn.ts";
 
 import { handleRelayRequest, type HubBridge } from "../src/http.ts";
 import { MemoryOAuthStore, handleOAuthRequest, pkceS256, sha256, type OAuthConfig } from "../src/oauth.ts";
@@ -7,6 +12,7 @@ import { MemoryOAuthStore, handleOAuthRequest, pkceS256, sha256, type OAuthConfi
 const MCP = "mcp-client-token-0123456789";
 const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const SECRET = "owner-approval-secret-1";
+const LEGACY_SCOPE = sha256(JSON.stringify(["ada@example.com", "test-client", null]));
 
 function bridge(): HubBridge & { calls: unknown[] } {
   const calls: unknown[] = [];
@@ -91,13 +97,156 @@ test("gemini mcp lists shell tools and forwards calls with OAuth", async () => {
   assert.deepEqual(hub.calls[0], {
     machine: "my-pc",
     op: "shell_run",
-    params: { argv: ["git", "status"], cwd: "C:\\src" },
+    params: { argv: ["git", "status"], cwd: "C:\\src", sessionScope: LEGACY_SCOPE },
   });
-  assert.deepEqual(hub.calls[1], {
-    machine: "my-pc",
-    op: "shell_job",
-    params: { jobId: "job_test" },
+  assert.equal(hub.calls.length, 2);
+  const held = hub.calls[1] as { machine: string; op: string; params: { jobId: string; holdMs: number } };
+  assert.equal(held.op, "shell_job");
+  assert.equal(held.machine, "my-pc");
+  assert.equal(held.params.jobId, "job_test");
+  assert.ok(held.params.holdMs > 40_000 && held.params.holdMs <= 45_000);
+});
+
+test("Gemini sessions isolate jobs, notices, and audit across restarts", async () => {
+  const { config, token } = await authenticatedShell();
+  const temp = mkdtempSync(path.join(tmpdir(), "grokcode-session-"));
+  const root = path.join(temp, "workspace");
+  const outputDir = path.join(temp, "output");
+  const taskDir = path.join(temp, "tasks");
+  const auditPath = path.join(temp, "audit.log");
+  mkdirSync(root);
+  const platform = process.platform === "win32" ? "win32" : "posix";
+  const policy = parsePolicy(JSON.stringify({
+    version: 1, roots: [root], allowJobInput: true, allow: [{ command: "echo" }],
+    projects: { sample: { root, testCommand: ["echo"] } },
+  }), platform, temp);
+  const createAgent = () => createShellRuntime({
+    platform, home: temp, auditPath, outputDir, taskDir, loadPolicy: () => ({ policy, source: "test" }),
+    spawnImpl: () => {
+      let finish: Parameters<Spawned["onExit"]>[0];
+      return {
+        stdout: null, stderr: null,
+        kill: () => finish(null, "SIGTERM"),
+        onExit: (callback) => { finish = callback; },
+      };
+    },
   });
+  let agent = createAgent();
+  const createRelay = () => ({
+    oauth: config,
+    bridge: {
+      listMachines: async () => [{ name: "my-pc", connectedAt: 1 }],
+      call: (_machine: string, op: string, params: unknown) => agent.execute(op, params),
+    },
+  });
+  let relay = createRelay();
+  const request = (method: string, params?: unknown, sessionId?: string) => handleRelayRequest(
+    new Request("https://relay.example/gemini/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    }), relay,
+  );
+  const tool = async (sessionId: string | undefined, name: string, args: unknown = {}) => {
+    const response = await request("tools/call", { name, arguments: args }, sessionId);
+    assert.equal(response.status, 200);
+    const { result } = await response.json() as { result: { content: Array<{ text: string }> } };
+    return JSON.parse(result.content[0]!.text);
+  };
+  try {
+    const initialized = await request("initialize");
+    assert.equal(initialized.headers.get("access-control-expose-headers"), "Mcp-Session-Id");
+    const first = initialized.headers.get("mcp-session-id")!;
+    const second = (await request("initialize", undefined, first)).headers.get("mcp-session-id")!;
+    assert.match(first, /^[A-Za-z0-9_-]{43}$/);
+    assert.match(second, /^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(first, second);
+
+    const command = { cwd: root, argv: ["echo"], wait: false };
+    const [a, b] = await Promise.all([tool(first, "run_command", command), tool(second, "run_command", command)]);
+    assert.equal(a.status, "running");
+    assert.equal(b.status, "running");
+    assert.deepEqual((await tool(first, "list_jobs")).jobs.map((job: { jobId: string }) => job.jobId), [a.jobId]);
+    assert.deepEqual((await tool(second, "list_jobs")).jobs.map((job: { jobId: string }) => job.jobId), [b.jobId]);
+    assert.deepEqual((await tool(undefined, "list_jobs")).jobs, []);
+    const aScope = sha256(JSON.stringify(["ada@example.com", "test-client", first]));
+    for (const name of ["get_job", "poll_output", "kill_job", "send_input", "read_file"]) {
+      const denied = await tool(second, name, {
+        jobId: a.jobId, input: "\n", path: `grokcode-output:${a.jobId}`, sessionScope: aScope,
+      });
+      assert.equal(denied.error, "job_not_found", name);
+    }
+
+    relay = createRelay();
+    assert.equal((await tool(first, "get_job", { jobId: a.jobId, wait: false })).status, "running");
+    await tool(first, "kill_job", { jobId: a.jobId });
+    assert.deepEqual((await tool(second, "list_jobs")).notices, []);
+    assert.deepEqual((await tool(first, "list_jobs")).notices.map((notice: { jobId: string }) => notice.jobId), [a.jobId]);
+    assert.deepEqual((await tool(first, "list_jobs")).notices, []);
+    assert.ok(readFileSync(auditPath, "utf8").split("\n").filter(Boolean).some((line) => {
+      const row = JSON.parse(line);
+      return row.tool === "shell_run" && row.jobId === a.jobId && row.sessionId === aScope;
+    }));
+
+    const task = await tool(first, "run_task", { project: "sample" });
+    assert.match(task.taskId, /^task_/);
+    assert.equal((await tool(second, "cancel_task", { taskId: task.taskId })).error, "task_not_found");
+    await tool(first, "cancel_task", { taskId: task.taskId });
+    agent.killAll();
+    agent = createAgent();
+    assert.equal((await tool(second, "get_task_activity", { taskId: task.taskId })).error, "task_not_found");
+    assert.equal((await tool(first, "get_task_status", { taskId: task.taskId })).phase, "cancelled");
+    assert.deepEqual((await tool(first, "list_jobs")).jobs, []);
+    assert.equal((await tool(first, "get_job", { jobId: a.jobId, wait: false })).error, "job_not_found");
+    assert.equal((await tool(first, "run_command", command)).status, "running");
+  } finally {
+    agent.killAll();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("Gemini keeps a job status request open until the agent returns its result", { timeout: 2_000 }, async () => {
+  const { config, token } = await authenticatedShell();
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  let finish!: (value: unknown) => void;
+  const finished = new Promise<unknown>((resolve) => { finish = resolve; });
+  let completed = false;
+  const result = handleRelayRequest(new Request("https://relay.example/gemini/mcp", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 3, method: "tools/call",
+      params: { name: "get_job", arguments: { jobId: "job_test" } },
+    }),
+  }), {
+    mcpToken: MCP, oauth: config, maxSyncWaitMs: 30_000,
+    bridge: {
+      listMachines: async () => [{ name: "my-pc", connectedAt: 1 }],
+      async call(_machine, op, params, timeoutMs) {
+        enter();
+        return finished.then((result) => {
+          assert.equal(op, "shell_job");
+          assert.deepEqual(params, { jobId: "job_test", holdMs: 30_000, sessionScope: LEGACY_SCOPE });
+          assert.equal(timeoutMs, 35_000);
+          return result;
+        });
+      },
+    },
+  }).then((response) => {
+    completed = true;
+    return response;
+  });
+  await entered;
+  assert.equal(completed, false);
+  const job = { jobId: "job_test", status: "exited", exitCode: 7, output: "done" };
+  finish(job);
+  const body = await (await result).json() as { result: { content: Array<{ text: string }> } };
+  assert.deepEqual(JSON.parse(body.result.content[0]!.text), job);
 });
 
 test("gemini mcp rejects a missing token with protected-resource metadata", async () => {
@@ -111,6 +260,38 @@ test("gemini mcp rejects a missing token with protected-resource metadata", asyn
   );
   assert.equal(response.status, 401);
   assert.match(response.headers.get("www-authenticate") ?? "", /resource_metadata="https:\/\/relay\.example\/\.well-known\/oauth-protected-resource\/gemini\/mcp"/);
+});
+
+test("code mode is opt-in and derives ownership from the OAuth token", async () => {
+  const { config, token } = await authenticatedShell();
+  const calls: Array<{ op: string; params: unknown; timeoutMs?: number }> = [];
+  const hub: HubBridge = {
+    listMachines: async () => [{ name: "my-pc", connectedAt: 1 }],
+    async call(_machine, op, params, timeoutMs) {
+      calls.push({ op, params, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+      return { executionId: "exec_fixture", status: "running" };
+    },
+  };
+  const call = async (enabled: boolean, method: string, params?: unknown) => {
+    const response = await handleRelayRequest(new Request("https://relay.example/gemini/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    }), { mcpToken: MCP, bridge: hub, oauth: config, enableCodeMode: enabled });
+    return (await response.json()).result;
+  };
+  assert.equal((await call(false, "tools/list")).tools.some((tool: { name: string }) => tool.name === "execute"), false);
+  assert.equal((await call(true, "tools/list")).tools.some((tool: { name: string }) => tool.name === "execute"), true);
+  const params = { name: "execute", arguments: { code: "return 1", owner: "forged" } };
+  assert.equal((await call(false, "tools/call", params)).isError, true);
+  assert.equal(calls.length, 0);
+  const result = await call(true, "tools/call", params);
+  assert.deepEqual(JSON.parse(result.content[0].text), { executionId: "exec_fixture", status: "running", machine: "my-pc" });
+  assert.deepEqual(calls, [{
+    op: "shell_code_execute",
+    params: { code: "return 1", owner: LEGACY_SCOPE, holdMs: 45_000, sessionScope: LEGACY_SCOPE },
+    timeoutMs: 50_000,
+  }]);
 });
 
 test("an oauth access token can call the shell endpoint and the original /mcp stays on its own tools", async () => {

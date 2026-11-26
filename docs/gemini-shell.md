@@ -22,7 +22,7 @@ No real token belongs in git. The relay worker deploys from GitHub Actions when 
 | `/.well-known/oauth-protected-resource` and `.../gemini/mcp` | Gemini | Public |
 | `/agent` | Each PC | Per-machine token, unchanged |
 
-The worker implements OAuth 2.1 for the Gemini endpoint, including RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. A refresh token is stable: every refresh returns that same token. It expires 90 days after it was created, and a refresh does not move that deadline. Access tokens last one hour and are bound to `https://<origin>/gemini/mcp`. Clients can revoke tokens at `/oauth/revoke`. Dynamic registration is capped (50 clients unless the process is restarted with a fresh store).
+The worker implements OAuth 2.1 for the Gemini endpoint, including RFC 8414 metadata, RFC 9728 protected-resource metadata, S256 PKCE, and RFC 7591 dynamic client registration. A refresh token is stable: every refresh returns that same token. It expires 90 days after it was created, and a refresh does not move that deadline. Access tokens last one hour and are bound to `https://<origin>/gemini/mcp`. Clients can revoke tokens at `/oauth/revoke`. Dynamic registration allows up to 50 active clients by default. Each dynamic client expires after 90 days and frees a registration slot.
 
 Without pins, Gemini can register the six official Connected Apps callbacks: `https` on `oauth-redirect.googleusercontent.com`, `oauth-redirect-sandbox.googleusercontent.com`, and `oauth-redirect-test.googleusercontent.com`, each under `/r/` or `/a/`, with no port. Other paths, ports, schemes, and hosts are rejected, including loopback. Configure `OAUTH_PINNED_REDIRECTS` to require exact callbacks, including for loopback development clients. Set `PUBLIC_ORIGIN` to the origin clients use when the worker's request host is not that URL (a custom domain, or a proxy in front of `*.workers.dev`).
 
@@ -89,7 +89,7 @@ npx wrangler secret put OWNER_APPROVAL_SECRET
 # at least 16 characters
 ```
 
-If Google credentials and the approval secret are both set, Google sign-in is what Gemini's browser hits. Leave `OWNER_APPROVAL_SECRET` unset when you use Google. `OWNER_EMAILS` is still required.
+Three wrong secrets expire an approval transaction. Ten failed attempts within an hour lock approval-secret mode for one hour. Google sign-in is preferred and uses its own approval flow. Leave `OWNER_APPROVAL_SECRET` unset when you use Google. `OWNER_EMAILS` is still required.
 
 Optional pre-registered client, if you would rather type a client id and secret into Gemini than use dynamic registration:
 
@@ -156,9 +156,29 @@ Every git spawn, including `git_status`, `git_diff`, `git_log`, `git_commit_push
 
 File tools resolve the real path, canonicalize the existing prefix with `realpath`, and refuse a symlink that lands outside the roots, a Windows alternate data stream, a `.git` path segment, a `gitdir:` file, and paths such as `.ssh` and `.env`. `.gitignore`, `.gitattributes`, and `.github/` stay readable.
 
-Read-only tools (`readOnlyHint`): `list_machines`, `get_machine_info`, `get_job`, `poll_output`, `read_file`, `list_dir`, `search_files`, `git_status`, `git_diff`, `git_log`. Destructive tools: `run_command`, `write_file`, `apply_patch`, `kill_job`, `git_commit_push`. Gemini shows its confirmation card for the destructive tools. The PC does not ask again.
+Read-only tools (`readOnlyHint`): `list_machines`, `get_machine_info`, `get_job`, `poll_output`, `read_file`, `list_dir`, `search_files`, `git_status`, `git_diff`, `git_log`. Destructive tools: `run_command`, `write_file`, `edit_file`, `apply_patch`, `send_input`, `kill_job`, `git_commit_push`. Gemini shows its confirmation card for the destructive tools. The PC does not ask again.
 
-`run_command` waits up to about 20 seconds by default. Use `wait: false` to return immediately with a job ID. Poll `get_job` for status, pass `nextOffset` to `poll_output` for the next page, or cancel a running command with `kill_job`.
+Use `edit_file` with `path`, `oldText`, and `newText` for an exact edit to an existing UTF-8 file. Set `replaceAll: true` for all non-overlapping matches. Otherwise the old text must occur once. Use an empty `newText` to delete the match. Matching treats LF and CRLF as equivalent, preserves untouched line endings, and uses the file's dominant style for extra newlines. The agent serializes edits to each file within its process and preserves file permissions. The response reports replacement and line counts. If the diff exceeds its computation budget, `diff.exact: false` indicates whole-file line counts.
+
+Audit rows include `bytesReturned` (UTF-8 bytes of the serialized machine result or tool error), `estimatedTokens` (bytes divided by four, rounded up), `exitCode` when available, `durationMs`, `truncated`, and `sessionId`. The byte count excludes transport framing. One Gemini tool call can produce more than one machine operation, such as command admission followed by a status hold. Stdin writes also record a pre-write admission row with zero returned bytes.
+
+Run `grokcode audit` for per-tool calls, denials, bytes, and busiest hours in UTC. It reads the active log and its latest rotation. Use `grokcode audit --file <path>` for a custom log path.
+
+The Gemini endpoint returns a soft `Mcp-Session-Id` header on initialization. Send it with subsequent requests to keep job IDs, saved output, and completion notices scoped to the chat. A relay restart preserves the scope. After an agent restart, the same header still works, and in-memory jobs from the old process are gone. Clients that omit the header share a fallback scope within their OAuth identity and client. The machine audit log records a stable session fingerprint.
+
+`run_command` waits up to 45 seconds by default. Use `wait: false` to return immediately with a job ID. Each `get_job` call waits up to 45 seconds for completion. Set `wait: false` for an immediate status snapshot. Set the relay variable `MAX_SYNC_WAIT_MS` to shorten both holds. The command timeout still comes from the machine policy and the requested `timeoutMs`. Pass `nextOffset` to `poll_output` for the next page, or cancel a running command with `kill_job`.
+
+Command and test-job responses show up to 10 KiB from each end of the sanitized output. Set `limits.outputPreviewBytes` in the machine policy to lower the per-end budget. The preview also respects `limits.maxOutputBytes`. When `omittedBytes` is positive, `headBytes` identifies where the two parts meet. ANSI escapes and recognized credentials are removed before output is returned or saved.
+
+When a job finishes, pass its `outputFile` value as the path to `read_file` to page through the complete sanitized log while the job is still known to the agent. The logs live in the configuration directory under `outputs/` (normally `~/.config/grokcode/outputs/`). Each completed job triggers cleanup of logs older than seven days and keeps at most 32 logs. A separate 16 MiB capture limit stops runaway output. Such jobs report `captureLimitReached` and retain the sanitized complete lines captured before the limit.
+
+### Experimental read-only code mode
+
+Set `ENABLE_CODE_MODE=1` on the relay and `GROKCODE_ENABLE_CODE_MODE=1` on the agent to opt in. The agent requires a configured audit log. `execute` accepts an async JavaScript function body, for example `return (await tools.read_file({ path: "/repo/README.md" })).content;`. Use `poll_execution` with the returned machine and execution ID to wait again, or `cancel_execution` to stop the run. Set `wait: false` for an immediate response. The default hold is 45 seconds and follows `MAX_SYNC_WAIT_MS`.
+
+QuickJS/Wasm runs on the selected agent. Its only host capabilities are `tools.read_file`, `tools.list_dir`, and `tools.search_files`. Every nested call uses the agent's normal path policy and audit log. An allowed read whose audit write fails returns an error in place of the data. Polling and cancellation require the same OAuth account and client that started the execution. Runs and results are held in agent memory and results expire after ten minutes.
+
+Each run has limits of 8 KiB of source, 8 MiB of sandbox memory, one second of guest CPU time, and two minutes of elapsed time. It can make up to 32 nested reads, four at once, with at most 512 KiB of nested results and a 32 KiB final result. An agent runs at most two scripts concurrently.
 
 ## Add the custom app in Gemini
 
@@ -214,10 +234,12 @@ Every tool takes `machine` except `list_machines`, which is required when more t
 | `get_machine_info` | OS, shell, roots, allowlisted commands and subcommands. Read-only. |
 | `run_command` | `argv` plus absolute `cwd`. No shell unless `shell` is true, and `allowShell: true` means an arbitrary shell. Returns a job id. Destructive. |
 | `get_job` / `poll_output` | Status and output for that job. Read-only. |
-| `read_file` / `list_dir` | Inside the roots. Reads support inclusive line ranges and default to 32 KiB per page. Directories return the first 500 sorted entries and report truncation. Read-only. |
+| `read_file` / `list_dir` | Inside the roots. Reads return up to 800 lines or 46,000 source bytes per page. Responses include the page line range, file totals, and `hasMore`. To continue, pass `nextOffset` as `offset` with the same path and inclusive line range. Directories return the first 500 sorted entries and report truncation. Read-only. |
 | `search_files` | Literal text lookup with an optional filename glob. Skips hidden paths and symlinks. Read-only. |
 | `git_status` | Fixed `git status --porcelain`. Requires the `status` allowlist entry. Read-only. |
 | `git_diff` / `git_log` | Unstaged changes by default, staged changes on request, and recent commit history. Read-only. |
-| `kill_job` | Cancel a running command on the selected machine. Destructive. |
+| `list_jobs` | List retained jobs and collect unread job completion notices for the current session. |
+| `send_input` | Write text to a running command started with `stdin: true`. Requires `allowJobInput: true` and an available audit log. Include a newline for line-oriented prompts. |
+| `kill_job` | Terminate a running command and its process tree on the selected machine. Destructive. |
 | `write_file` / `apply_patch` | Inside the roots. Unified diffs. Destructive. |
 | `git_commit_push` | Named paths and a branch allowlist. Push is refused before any commit when `git.push` is false. A push failure after a commit returns the commit SHA and the push error, with `isError` set, and says to retry only the push. Destructive. |

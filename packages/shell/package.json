@@ -30,6 +30,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "grokcode-shared": "0.1.0"
+    "diff": "8.0.4",
+    "grokcode-shared": "0.1.0",
+    "quickjs-emscripten": "0.32.0"
   }
 }
