@@ -304,7 +304,7 @@ const tools: ShellTool[] = [
   },
   {
     name: "search_files",
-    description: `Find literal text under cwd, which defaults to the root of the named project. By default, skips ${SEARCH_IGNORED_DIRECTORIES.join(", ")} directories and *.map files. Hidden paths, sensitive paths, symlinks within the search, and binary files are excluded. Reports the search scope, exclusions, and limits reached. Requires the rg policy entry.`,
+    description: `Find literal text under cwd, which defaults to the root of the named project. By default, skips ${SEARCH_IGNORED_DIRECTORIES.join(", ")} directories and *.map files. An explicitly scoped dependency search includes its build folders. Hidden paths, sensitive paths, and binary files are excluded. Symlinks are skipped, with an exception for in-scope pnpm package aliases when includeIgnored is true. Reports the search scope, exclusions, and limits reached. Requires the rg policy entry.`,
     op: "shell_search_files",
     annotations: readOnly,
     inputSchema: {
@@ -314,7 +314,7 @@ const tools: ShellTool[] = [
         cwd: { type: "string", description: "Absolute directory inside the allowed roots, or a path relative to the named project. Required without a project." },
         query: { type: "string", description: "Case-sensitive literal text." },
         glob: { type: "string", description: "Optional filename glob using * and ?, such as *.ts. Use a glob ending in .map to search source maps." },
-        includeIgnored: { type: "boolean", description: `Include ${SEARCH_IGNORED_DIRECTORIES.join(", ")} directories. Defaults to false.` },
+        includeIgnored: { type: "boolean", description: `Include ${SEARCH_IGNORED_DIRECTORIES.join(", ")} directories and in-scope pnpm package aliases. Defaults to false.` },
       },
       required: ["query"],
       additionalProperties: false,

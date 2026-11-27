@@ -258,6 +258,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
             includeIgnored: record.includeIgnored === true,
           },
           ctx,
+          signal,
         );
       }
       case "shell_git_diff":
