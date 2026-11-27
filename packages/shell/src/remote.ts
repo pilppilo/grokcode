@@ -109,6 +109,11 @@ export async function callShellTool(
   if (!tool.op) throw new ToolError(`Tool ${name} has no op.`, "unknown_tool");
   const timeout = name === "git_commit_push" ? 90_000 : name === "get_job" ? holdTimeout : 20_000;
   const result = await backend.call(machine, tool.op, record, timeout, options.signal);
+  if (name === "read_file" && isRecord(result) && typeof result.coverage === "string" && typeof result.content === "string") {
+    const { coverage, content, ...metadata } = result;
+    const header = `${coverage}\n${JSON.stringify(metadata)}`;
+    return metadata.fileComplete === true ? `${header}\n\n${content}` : `${header}\n\n${content}\n\n${coverage}`;
+  }
   if (name === "git_commit_push") {
     const failure = commitPushFailure(result);
     // isError stays false for a clean commit. A push that fails after the

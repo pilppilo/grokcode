@@ -35,7 +35,7 @@ export function confineFile(input: string, ctx: FileContext, cwd: string | undef
   });
 }
 
-export const READ_PAGE_BYTES = 46_000;
+export const READ_PAGE_BYTES = 38_000;
 const READ_PAGE_LINES = 800;
 
 export interface ReadPageOptions {
@@ -68,6 +68,7 @@ export async function readPage(file: string, maxReadBytes: number, options: Read
     let rangeStart = first === 1 ? 0 : totalBytes;
     let rangeEnd = totalBytes;
     let offsetLine = 1;
+    let offsetAtLineStart = requested === 0;
     let breaks = 0;
     let lastByte: number | undefined;
     const chunk = Buffer.alloc(64 * 1024);
@@ -83,6 +84,7 @@ export async function readPage(file: string, maxReadBytes: number, options: Read
         if (breaks + 1 === first) rangeStart = after;
         if (breaks === options.endLine) rangeEnd = after;
         if (after <= requested) offsetLine++;
+        if (after === requested) offsetAtLineStart = true;
       }
       position += count;
     }
@@ -120,19 +122,46 @@ export async function readPage(file: string, maxReadBytes: number, options: Read
     const endLine = startLine === null ? null : startLine + pageBreaks - (buffer[bytes - 1] === 10 ? 1 : 0);
     const nextOffset = start + bytes;
     const hasMore = nextOffset < rangeEnd;
+    const fileComplete = start === 0 && nextOffset === totalBytes;
     const current = await fd.stat();
     signal?.throwIfAborted();
     if (current.size !== totalBytes || current.mtimeMs !== stat.mtimeMs || current.ctimeMs !== stat.ctimeMs) {
       throw new ToolError("The file changed during the read. Start again.", "file_changed");
     }
     const content = buffer.subarray(0, bytes).toString("utf8");
+    const startsMidLine = options.offset !== undefined && !offsetAtLineStart;
+    const endsMidLine = nextOffset < totalBytes && buffer[bytes - 1] !== 10;
+    const shownInFull = startLine === null || endLine === null ? 0
+      : Math.max(0, endLine - startLine + 1 - Number(startsMidLine) - Number(endsMidLine));
+    const missingLines = totalLines - shownInFull;
+    const shown = startLine === null ? "No lines shown" : `Showing lines ${startLine}-${endLine}`;
+    let coverage = `${shown} of ${totalLines}.`;
+    if (fileComplete) {
+      coverage += " This response covers the whole file.";
+    } else {
+      coverage += ` This response leaves ${missingLines} ${missingLines === 1 ? "line" : "lines"} unread or partially read.`;
+      const restart = "startLine=1 (omit offset and endLine).";
+      const continueByLine = endLine !== null && nextOffset < totalBytes;
+      if (hasMore) {
+        coverage += ` Continue with offset=${nextOffset}, keeping the same line range.`;
+      } else if (continueByLine) {
+        coverage += ` Continue with startLine=${endLine + 1} (omit offset and endLine).`;
+      } else {
+        coverage += ` Read from the beginning with ${restart}`;
+      }
+      if (start > 0 && (hasMore || continueByLine)) {
+        coverage += ` For earlier content, use ${restart}`;
+      }
+    }
     return {
       path: file,
+      coverage,
       content: alreadyRedacted ? content : redact(content, isSourceFile(file)),
       bytes,
       nextOffset,
       truncated: hasMore,
       hasMore,
+      fileComplete,
       startLine,
       endLine,
       totalLines,

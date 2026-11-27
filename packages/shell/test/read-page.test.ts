@@ -25,19 +25,15 @@ function fixture(t: TestContext, content: string) {
 test("read_file pages at 800 lines and continues an inclusive line range", async (t) => {
   const lines = Array.from({ length: 1_700 }, (_, i) => `line ${i + 1} 🙂\r\n`);
   const content = lines.join("");
-  const { read, runtime, file } = fixture(t, content);
-  const response = await handleStdioMessage({
-    jsonrpc: "2.0", id: 1, method: "tools/call",
-    params: { name: "read_file", arguments: { path: file, startLine: 12, endLine: 1_620 } },
-  }, localBackend("fixture", runtime)) as { result: { isError: boolean; content: Array<{ text: string }> } };
-  assert.equal(response.result.isError, false, response.result.content[0]?.text);
-  const first = JSON.parse(response.result.content[0]!.text) as Awaited<ReturnType<typeof read>>;
+  const { read } = fixture(t, content);
+  const range = { startLine: 12, endLine: 1_620 };
+  const first = await read(range);
   assert.equal(first.startLine, 12);
   assert.equal(first.endLine, 811);
   assert.equal(first.totalLines, 1_700);
   assert.equal(first.totalBytes, Buffer.byteLength(content));
-  const range = { startLine: 12, endLine: 1_620 };
   assert.equal(first.hasMore, true);
+  assert.equal(first.fileComplete, false);
   const second = await read({ ...range, offset: first.nextOffset });
   assert.equal(second.startLine, 812);
   assert.equal(second.endLine, 1_611);
@@ -45,22 +41,44 @@ test("read_file pages at 800 lines and continues an inclusive line range", async
   const last = await read({ ...range, offset: second.nextOffset });
   assert.equal(last.endLine, 1_620);
   assert.equal(last.hasMore, false);
+  assert.equal(last.fileComplete, false);
+  assert.match(last.coverage, /Continue with startLine=1621/);
   assert.equal(first.content + second.content + last.content, lines.slice(11, 1_620).join(""));
 });
 
+test("MCP read_file puts file-level coverage around the unescaped content of a partial range", async (t) => {
+  const { runtime, file } = fixture(t, "first\r\nsecond\r\nthird\r\nfourth\r\n");
+  const response = await handleStdioMessage({
+    jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "read_file", arguments: { path: file, startLine: 2, endLine: 3 } },
+  }, localBackend("fixture", runtime)) as { result: { isError: boolean; content: Array<{ text: string }> } };
+  const body = response.result.content[0]!.text;
+  assert.equal(response.result.isError, false, body);
+  const [summary, metadata] = body.split("\n");
+  assert.match(summary!, /^Showing lines 2-3 of 4\. This response leaves 2 lines/);
+  assert.match(summary!, /Continue with startLine=4/);
+  assert.match(summary!, /For earlier content, use startLine=1/);
+  assert.equal(JSON.parse(metadata!).fileComplete, false);
+  assert.equal(JSON.parse(metadata!).hasMore, false);
+  assert.ok(body.endsWith(`\n\nsecond\r\nthird\r\n\n\n${summary}`));
+});
+
 test("read_file continues across byte-limited pages without splitting UTF-8", async (t) => {
-  const content = "x".repeat(45_999) + "🙂".repeat(18_000) + "\nfinal";
+  const content = "x".repeat(37_999) + "🙂".repeat(18_000) + "\nfinal";
   const { read, file } = fixture(t, content);
   const first = await read({ maxBytes: 100_000 });
-  assert.equal(first.nextOffset, 45_999);
+  assert.equal(first.nextOffset, 37_999);
   assert.equal(first.endLine, 1);
+  assert.match(first.coverage, /leaves 2 lines.*Continue with offset=37999/);
   await assert.rejects(read({ offset: first.nextOffset + 1 }), /UTF-8 character boundary/);
   await assert.rejects(read({ offset: first.nextOffset, maxBytes: 3 }), /too small/);
   const second = await read({ offset: first.nextOffset });
   const last = await read({ offset: second.nextOffset });
   assert.equal(second.startLine, 1);
-  assert.equal(second.bytes, 46_000);
+  assert.equal(second.bytes, 38_000);
   assert.equal(last.hasMore, false);
+  assert.equal(last.fileComplete, false);
+  assert.match(last.coverage, /leaves 1 line unread or partially read.*startLine=1/);
   assert.equal(last.endLine, 2);
   assert.equal(last.totalLines, 2);
   assert.equal(last.nextOffset, Buffer.byteLength(content));
@@ -69,6 +87,17 @@ test("read_file continues across byte-limited pages without splitting UTF-8", as
   assert.equal(empty.content, "");
   assert.equal(empty.startLine, null);
   assert.equal(empty.hasMore, false);
+  assert.equal(empty.fileComplete, false);
+  assert.match(empty.coverage, /No lines shown of 2.*startLine=1/);
   await assert.rejects(read({ startLine: 2, offset: 0 }), /outside the requested line range/);
   await assert.rejects(read({ path: path.join(path.dirname(path.dirname(file)), "outside.txt") }), /outside the allowed roots/);
+});
+
+test("read_file reports whole-file coverage for complete and empty files", async (t) => {
+  for (const content of ["", "one\ntwo"]) {
+    const { read } = fixture(t, content);
+    const result = await read();
+    assert.equal(result.fileComplete, true);
+    assert.match(result.coverage, /covers the whole file/);
+  }
 });

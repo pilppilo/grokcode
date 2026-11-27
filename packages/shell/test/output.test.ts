@@ -60,7 +60,7 @@ test("job output keeps a byte-bounded head and tail and saves the full sanitized
       path: string; content: string; hasMore: boolean; nextOffset: number;
     };
     assert.equal(page.path, view.outputFile);
-    assert.ok(Buffer.byteLength(page.content) <= 46_000);
+    assert.ok(Buffer.byteLength(page.content) <= 38_000);
     parts.push(page.content);
     if (!page.hasMore) break;
     assert.ok(page.nextOffset > offset);
