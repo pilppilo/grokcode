@@ -267,7 +267,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         return readFilePage(requiredString(record.path, "path", 4096), ctx, readPageOptions(record, policy), signal);
       }
       case "shell_list_dir":
-        return listDir(requiredString(record.path, "path", 4096), ctx);
+        return listDir(requiredString(record.path, "path", 4096), ctx, signal);
       case "shell_write_file":
         return writeFile(requiredString(record.path, "path", 4096), contentsArg(record.contents, policy.limits.maxWriteBytes), ctx);
       case "shell_edit_file": {

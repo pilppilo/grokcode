@@ -190,7 +190,7 @@ const tools: ShellTool[] = [
   },
   {
     name: "list_dir",
-    description: "List one directory inside the allowed roots. Entries are names and types. Symlink targets are not returned. Read-only.",
+    description: "List the first 500 sorted entries in a directory inside the allowed roots. File entries show size in bytes and a line count when available. Large files use a sample-based estimate. Symlink entries show the name and type only.",
     op: "shell_list_dir",
     annotations: readOnly,
     inputSchema: {

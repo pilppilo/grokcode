@@ -176,18 +176,73 @@ export function readGuidanceFile(input: string, ctx: FileContext, maxBytes: numb
   }
 }
 
-export function listDir(input: string, ctx: FileContext): { path: string; entries: Array<{ name: string; type: "file" | "dir" | "symlink" | "other" }>; truncated: boolean } {
+const LIST_DIR_ENTRIES = 500;
+const LINE_COUNT_SAMPLE_BYTES = 64 * 1024;
+
+export async function listDir(input: string, ctx: FileContext, signal?: AbortSignal) {
   const dir = confineFile(input, ctx, undefined, false, true);
   const st = fs.lstatSync(dir);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new ToolError("path is not a directory.", "invalid_path");
-  const entries = fs
-    .readdirSync(dir, { withFileTypes: true })
-    .map((entry) => ({
-      name: entry.name,
-      type: entry.isSymbolicLink() ? ("symlink" as const) : entry.isDirectory() ? ("dir" as const) : entry.isFile() ? ("file" as const) : ("other" as const),
-    }))
+  const sorted = (await fs.promises.readdir(dir, { withFileTypes: true }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return { path: dir, entries: entries.slice(0, 500), truncated: entries.length > 500 };
+  const entries = [];
+  const path = pathApi(ctx.platform);
+  for (const entry of sorted.slice(0, LIST_DIR_ENTRIES)) {
+    signal?.throwIfAborted();
+    const { name } = entry;
+    if (entry.isFile()) {
+      entries.push({ name, type: "file" as const, ...await summarizeListedFile(path.join(dir, name), ctx) });
+    } else {
+      const type = entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "dir" : "other";
+      entries.push({ name, type });
+    }
+  }
+  signal?.throwIfAborted();
+  return { path: dir, entries, truncated: sorted.length > LIST_DIR_ENTRIES };
+}
+
+async function summarizeListedFile(input: string, ctx: FileContext) {
+  let size: number | null = null;
+  const unknownLines = () => ({ size, lineCount: null, lineCountEstimated: false });
+  try {
+    const file = confineFile(input, ctx, undefined, false, false);
+    const expected = fs.lstatSync(file);
+    if (!expected.isFile()) return unknownLines();
+    size = expected.size;
+    if (size === 0) return { size, lineCount: 0, lineCountEstimated: false };
+
+    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+    const fd = await fs.promises.open(file, flags);
+    try {
+      const stat = await fd.stat();
+      if (!stat.isFile() || stat.dev !== expected.dev || stat.ino !== expected.ino) return unknownLines();
+      size = stat.size;
+      if (size === 0) return { size, lineCount: 0, lineCountEstimated: false };
+      const sample = Buffer.alloc(Math.min(size, LINE_COUNT_SAMPLE_BYTES, ctx.policy.limits.maxReadBytes));
+      let position = 0;
+      while (position < sample.length) {
+        const { bytesRead } = await fd.read(sample, position, sample.length - position, position);
+        if (bytesRead === 0) return unknownLines();
+        position += bytesRead;
+      }
+      const current = await fd.stat();
+      if (current.size !== stat.size || current.mtimeMs !== stat.mtimeMs || current.ctimeMs !== stat.ctimeMs || sample.includes(0)) {
+        return unknownLines();
+      }
+      let breaks = 0;
+      for (let index = sample.indexOf(10); index !== -1; index = sample.indexOf(10, index + 1)) breaks++;
+      const lineCountEstimated = sample.length < size;
+      const lineCount = lineCountEstimated
+        ? Math.max(1, Math.round(breaks * size / sample.length))
+        : breaks + (sample[sample.length - 1] === 10 ? 0 : 1);
+      return { size, lineCount, lineCountEstimated };
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    // An inaccessible or replaced entry should not prevent listing its siblings.
+    return unknownLines();
+  }
 }
 
 /** A `.git` gitfile (`gitdir: ...`) points Git at another directory and can run that directory's hooks. */
