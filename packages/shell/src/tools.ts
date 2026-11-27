@@ -171,7 +171,7 @@ const tools: ShellTool[] = [
   },
   {
     name: "read_file",
-    description: "Read up to 800 lines or 46,000 bytes from a UTF-8 file inside the allowed roots. The response includes page line numbers, file totals, and hasMore. When hasMore is true, pass nextOffset as offset with the same path and line range.",
+    description: "Read up to 800 lines or 38,000 bytes from a UTF-8 file inside the allowed roots. fileComplete reports whether this response covers the entire file. When hasMore is true, pass nextOffset as offset with the same path and line range. Follow the coverage note to read outside the requested range.",
     op: "shell_read_file",
     annotations: readOnly,
     inputSchema: {
@@ -182,7 +182,7 @@ const tools: ShellTool[] = [
         offset: { type: "integer", minimum: 0, description: "UTF-8 byte offset. Use the previous page's nextOffset to continue." },
         startLine: { type: "integer", minimum: 1, description: "First line of the range, inclusive. Repeat on continuation requests." },
         endLine: { type: "integer", minimum: 1, description: "Last line of the range, inclusive. Repeat on continuation requests." },
-        maxBytes: { type: "integer", minimum: 1, description: "Maximum source bytes, capped at 46,000 and by machine policy." },
+        maxBytes: { type: "integer", minimum: 1, description: "Maximum source bytes, capped at 38,000 and by machine policy." },
       },
       required: ["path"],
       additionalProperties: false,

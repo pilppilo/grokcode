@@ -234,7 +234,7 @@ Every tool takes `machine` except `list_machines`, which is required when more t
 | `get_machine_info` | OS, shell, roots, allowlisted commands and subcommands. Read-only. |
 | `run_command` | `argv` plus absolute `cwd`. No shell unless `shell` is true, and `allowShell: true` means an arbitrary shell. Returns a job id. Destructive. |
 | `get_job` / `poll_output` | Status and output for that job. Read-only. |
-| `read_file` / `list_dir` | Inside the roots. Reads return up to 800 lines or 46,000 source bytes per page. Responses include the page line range, file totals, and `hasMore`. To continue, pass `nextOffset` as `offset` with the same path and inclusive line range. Directories return the first 500 sorted entries and report truncation. Read-only. |
+| `read_file` / `list_dir` | Inside the roots. Reads return up to 800 lines or 38,000 source bytes per page. `fileComplete` indicates that the response covers the whole file. When `hasMore` is true, pass `nextOffset` as `offset` with the same path and inclusive line range. The coverage note explains how to continue outside that range. Directories return the first 500 sorted entries and report truncation. Read-only. |
 | `search_files` | Literal text lookup with an optional filename glob. Skips hidden paths and symlinks. Read-only. |
 | `git_status` | Fixed `git status --porcelain`. Requires the `status` allowlist entry. Read-only. |
 | `git_diff` / `git_log` | Unstaged changes by default, staged changes on request, and recent commit history. Read-only. |
