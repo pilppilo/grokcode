@@ -2,8 +2,6 @@ import type { ShellOpName, ToolAnnotations } from "grokcode-shared";
 
 export const SHELL_SERVER_NAME = "grokcode-shell";
 export const SHELL_SERVER_VERSION = "0.1.0";
-export const READ_FILES_MAX_PATHS = 8;
-export const READ_FILES_MAX_BYTES = 46_000;
 
 export const SHELL_INSTRUCTIONS = [
   "grokcode-shell runs commands and edits files on the owner's own PCs.",
@@ -38,6 +36,10 @@ export interface ShellTool {
 
 const project = { type: "string", description: "Project name from list_machines." };
 const taskId = { type: "string", description: "Task ID returned by run_task." };
+
+export const READ_FILES_MAX_PATHS = 8;
+export const READ_FILES_MAX_BYTES = 46_000;
+
 const tools: ShellTool[] = [
   {
     name: "run_task",
