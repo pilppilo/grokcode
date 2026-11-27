@@ -26,6 +26,7 @@ export const SHELL_OPS = [
   "shell_git_diff",
   "shell_git_log",
   "shell_read_file",
+  "shell_read_files",
   "shell_list_dir",
   "shell_write_file",
   "shell_edit_file",

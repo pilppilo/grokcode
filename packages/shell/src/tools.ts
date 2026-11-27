@@ -9,10 +9,11 @@ export const SHELL_INSTRUCTIONS = [
   "Call list_machines first to discover reachable machines, their configured projects, and allowed roots. Specify a project to resolve relative file paths within its root. Pass machine when more than one PC is online.",
   "get_machine_info reports the OS, the shell (pwsh on Windows, bash on Linux), and the allowed roots.",
   "Call check_repo with a project and optional project-relative cwd to discover repository guidance. When a project tool reports a different guidance scope or fingerprint, call check_repo for that scope. Local policy and user authorization govern every tool call.",
+  "Read every file your design depends on in full before writing about it. Use read_files for several small files and continue any partial read with read_file.",
   "run_command takes argv (the program plus arguments) and an absolute cwd inside those roots. It does not invoke a shell unless shell is true and that machine's policy sets allowShell, which means an arbitrary shell.",
   "Commands are deny-by-default. A command must match the per-machine allowlist, and a hard deny list blocks privilege escalation, recursive deletes of a drive root, and argument-based code execution such as git -c.",
   "wait defaults to true and blocks for up to about 45 seconds. Poll get_job or poll_output for running jobs, or use kill_job to cancel.",
-  "read_file, list_dir, write_file, edit_file, and apply_patch stay inside the allowed roots and refuse symlink escapes.",
+  "read_file, read_files, list_dir, write_file, edit_file, and apply_patch stay inside the allowed roots and refuse symlink escapes.",
   "git_commit_push only commits paths you name, and only on a branch in the policy allowlist. Push stays off unless the policy sets git.push. If push is requested while git.push is false, nothing is staged or committed. A successful result includes the commit SHA. If the commit succeeds and the push fails, the error includes that SHA: retry only the push and do not create another commit.",
   "Mutating tools are marked destructive so the client can ask the owner to confirm. There is no second prompt on the PC.",
 ].join(" ");
@@ -36,6 +37,10 @@ export interface ShellTool {
 
 const project = { type: "string", description: "Project name from list_machines." };
 const taskId = { type: "string", description: "Task ID returned by run_task." };
+
+export const READ_FILES_MAX_PATHS = 8;
+export const READ_FILES_MAX_BYTES = 46_000;
+
 const tools: ShellTool[] = [
   {
     name: "run_task",
@@ -172,7 +177,7 @@ const tools: ShellTool[] = [
   },
   {
     name: "read_file",
-    description: "Read up to 800 lines or 38,000 bytes from a UTF-8 file inside the allowed roots. fileComplete reports whether this response covers the entire file. When hasMore is true, pass nextOffset as offset with the same path and line range. Follow the coverage note to read outside the requested range.",
+    description: "Read a UTF-8 file inside the allowed roots. Start without a line range and follow nextOffset until hasMore is false to read the whole file. Each page includes up to 800 lines or 38,000 source bytes. A line range limits the read to those lines. fileComplete reports whether this response covers the entire file. Follow the coverage note for unread lines outside the range.",
     op: "shell_read_file",
     annotations: readOnly,
     inputSchema: {
@@ -186,6 +191,28 @@ const tools: ShellTool[] = [
         maxBytes: { type: "integer", minimum: 1, description: "Maximum source bytes, capped at 38,000 and by machine policy." },
       },
       required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_files",
+    description: `Read up to ${READ_FILES_MAX_PATHS} UTF-8 files in one call, in path order, within a ${READ_FILES_MAX_BYTES.toLocaleString("en-US")}-byte reply. The summary identifies complete, partial, and unread files. Follow the reported offset with read_file to finish a partial file.`,
+    op: "shell_read_files",
+    annotations: readOnly,
+    inputSchema: {
+      type: "object",
+      properties: {
+        machine,
+        project,
+        paths: {
+          type: "array",
+          items: { type: "string", minLength: 1, maxLength: 4096 },
+          minItems: 1,
+          maxItems: READ_FILES_MAX_PATHS,
+          description: "File paths inside the allowed roots. Use absolute paths, or paths relative to the named project.",
+        },
+      },
+      required: ["paths"],
       additionalProperties: false,
     },
   },

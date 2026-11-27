@@ -75,6 +75,7 @@ test("gemini mcp lists shell tools and forwards calls with OAuth", async () => {
   assert.equal(body.result.tools.find((tool) => tool.name === "run_command")?.annotations?.destructiveHint, true);
   assert.equal(body.result.tools.find((tool) => tool.name === "get_machine_info")?.annotations?.readOnlyHint, true);
   assert.equal(body.result.tools.find((tool) => tool.name === "list_machines")?.annotations?.readOnlyHint, true);
+  assert.equal(body.result.tools.find((tool) => tool.name === "read_files")?.annotations?.readOnlyHint, true);
 
   const called = await handleRelayRequest(
     new Request("https://relay.example/gemini/mcp", {

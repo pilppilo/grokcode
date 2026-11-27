@@ -11,6 +11,7 @@ import {
   confineFile,
   listDir,
   readFilePage,
+  readFiles,
   readPage,
   readTextIfExists,
   validatePatchFile,
@@ -28,6 +29,7 @@ import { JobTable, type JobView } from "./jobs.js";
 import { applyHunks, parseUnifiedDiff } from "./patch.js";
 import { evaluateCommand, evaluateShell, parsePolicy, type LoadedPolicy, type Policy } from "./policy.js";
 import { defaultSpawn, reapDetachedChildren, type SpawnFn } from "./spawn.js";
+import { READ_FILES_MAX_PATHS } from "./tools.js";
 
 export interface ShellRuntimeOptions {
   platform: PathPlatform;
@@ -72,7 +74,7 @@ export function policyFromFile(file: string | undefined, platform: PathPlatform,
   }
 }
 
-const projectPathField: Partial<Record<string, "path" | "cwd">> = {
+const projectPathField: Partial<Record<string, "path" | "paths" | "cwd">> = {
   shell_run: "cwd",
   shell_check_repo: "cwd",
   shell_run_tests: "cwd",
@@ -82,6 +84,7 @@ const projectPathField: Partial<Record<string, "path" | "cwd">> = {
   shell_git_log: "cwd",
   shell_git_commit: "cwd",
   shell_read_file: "path",
+  shell_read_files: "paths",
   shell_list_dir: "path",
   shell_write_file: "path",
   shell_edit_file: "path",
@@ -194,6 +197,7 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
         throw new ToolError("The project root resolves outside its configured directory.", "path_denied");
       }
       ctx.policy = { ...policy, roots: [root] };
+      if (field === "paths") return readFiles(readPaths(record.paths), ctx, root, signal);
       const input = record[field];
       const target = input === undefined ? "." : requiredString(input, field, 4096);
       record = { ...record, [field]: pathApi(options.platform).resolve(root, target) };
@@ -274,6 +278,8 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
       case "shell_read_file": {
         return readFilePage(requiredString(record.path, "path", 4096), ctx, readPageOptions(record, policy), signal);
       }
+      case "shell_read_files":
+        return readFiles(readPaths(record.paths), ctx, undefined, signal);
       case "shell_list_dir":
         return listDir(requiredString(record.path, "path", 4096), ctx, signal);
       case "shell_write_file":
@@ -486,6 +492,14 @@ function stringArray(value: unknown, field: string): string[] {
     throw new ToolError(`${field} must be an array of strings.`, "invalid_argument");
   }
   return value;
+}
+
+function readPaths(value: unknown): string[] {
+  const paths = stringArray(value, "paths");
+  if (paths.length === 0 || paths.length > READ_FILES_MAX_PATHS) {
+    throw new ToolError(`paths must contain 1 to ${READ_FILES_MAX_PATHS} file paths.`, "invalid_argument");
+  }
+  return paths.map((path, index) => requiredString(path, `paths[${index}]`, 4096));
 }
 
 function numberArg(value: unknown, field: string, min: number, max: number): number | undefined {

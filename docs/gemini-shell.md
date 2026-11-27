@@ -156,7 +156,7 @@ Every git spawn, including `git_status`, `git_diff`, `git_log`, `git_commit_push
 
 File tools resolve the real path, canonicalize the existing prefix with `realpath`, and refuse a symlink that lands outside the roots, a Windows alternate data stream, a `.git` path segment, a `gitdir:` file, and paths such as `.ssh` and `.env`. `.gitignore`, `.gitattributes`, and `.github/` stay readable.
 
-Read-only tools (`readOnlyHint`): `list_machines`, `get_machine_info`, `get_job`, `poll_output`, `read_file`, `list_dir`, `search_files`, `git_status`, `git_diff`, `git_log`. Destructive tools: `run_command`, `write_file`, `edit_file`, `apply_patch`, `send_input`, `kill_job`, `git_commit_push`. Gemini shows its confirmation card for the destructive tools. The PC does not ask again.
+Read-only tools (`readOnlyHint`): `list_machines`, `get_machine_info`, `get_job`, `poll_output`, `read_file`, `read_files`, `list_dir`, `search_files`, `git_status`, `git_diff`, `git_log`. Destructive tools: `run_command`, `write_file`, `edit_file`, `apply_patch`, `send_input`, `kill_job`, `git_commit_push`. Gemini shows its confirmation card for the destructive tools. The PC does not ask again.
 
 Use `edit_file` with `path`, `oldText`, and `newText` for an exact edit to an existing UTF-8 file. Set `replaceAll: true` for all non-overlapping matches. Otherwise the old text must occur once. Use an empty `newText` to delete the match. Matching treats LF and CRLF as equivalent, preserves untouched line endings, and uses the file's dominant style for extra newlines. The agent serializes edits to each file within its process and preserves file permissions. The response reports replacement and line counts. If the diff exceeds its computation budget, `diff.exact: false` indicates whole-file line counts.
 
@@ -229,6 +229,8 @@ node packages/shell/dist/cli.js --policy ~/.config/grokcode/policy.json --name m
 In `list_dir`, file entries report `size` in bytes and `lineCount`. Large files use a sample of up to 64 KiB and set `lineCountEstimated`. A field is `null` when the metadata is unavailable, as with line counts for binary files.
 
 Every tool takes `machine` except `list_machines`, which is required when more than one PC is online.
+
+Use `read_files` with up to eight paths to read several small files together. With a named `project`, paths can be relative to its root. The 46,000-byte reply begins with a status for each requested file. Use `read_file` with the reported offset to continue a partial file.
 
 | Tool | Notes |
 | --- | --- |
