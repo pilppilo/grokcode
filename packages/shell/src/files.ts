@@ -7,6 +7,7 @@ import { ToolError, type PathPlatform } from "grokcode-shared";
 import { confine, pathApi } from "./confine.js";
 import type { Policy } from "./policy.js";
 import { redact } from "./redact.js";
+import { READ_FILES_MAX_BYTES } from "./tools.js";
 
 export interface FileContext {
   policy: Policy;
@@ -48,6 +49,44 @@ export interface ReadPageOptions {
 export function readFilePage(input: string, ctx: FileContext, options: ReadPageOptions, signal?: AbortSignal) {
   const file = regularFile(input, ctx);
   return readPage(file, ctx.policy.limits.maxReadBytes, options, false, signal);
+}
+
+export async function readFiles(inputs: string[], ctx: FileContext, projectRoot?: string, signal?: AbortSignal) {
+  const path = pathApi(ctx.platform);
+  const files = inputs.map((input) => {
+    const target = projectRoot === undefined ? input : path.resolve(projectRoot, input);
+    regularFile(target, ctx);
+    return { label: JSON.stringify(input), target, page: undefined as Awaited<ReturnType<typeof readPage>> | undefined };
+  });
+  function render() {
+    const summary = files.map(({ label, page }, index) => {
+      const status = page === undefined ? "Unread. Call read_file for this path."
+        : `${page.fileComplete ? "Complete." : "Partial."} ${page.coverage}`;
+      return `[${index + 1}] ${label} ${status}`;
+    });
+    const sections = files.flatMap(({ page }, index) => page ? [`[${index + 1}]\n${page.content}`] : []);
+    const continuation = projectRoot === undefined ? [] : ["Use the same project when continuing with read_file."];
+    return [[...continuation, ...summary].join("\n"), ...sections].join("\n\n");
+  }
+  // Leave space for the next coverage note and section label.
+  const metadataReserve = 256;
+  let text = render();
+  if (Buffer.byteLength(text) > READ_FILES_MAX_BYTES - metadataReserve - 4) {
+    throw new ToolError("The paths are too long for a read_files reply.", "too_large");
+  }
+  for (const file of files) {
+    signal?.throwIfAborted();
+    const maxBytes = READ_FILES_MAX_BYTES - Buffer.byteLength(text) - metadataReserve;
+    if (maxBytes < 4) break;
+    file.page = await readFilePage(file.target, ctx, { maxBytes }, signal);
+    const candidate = render();
+    if (Buffer.byteLength(candidate) > READ_FILES_MAX_BYTES) {
+      file.page = undefined;
+      continue;
+    }
+    text = candidate;
+  }
+  return { text, truncated: files.some(({ page }) => page?.fileComplete !== true) };
 }
 
 /** The caller authorizes the generated path. Do not pass a client-supplied path here. */

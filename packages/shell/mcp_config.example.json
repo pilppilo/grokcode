@@ -15,6 +15,7 @@
         "get_job",
         "poll_output",
         "read_file",
+        "read_files",
         "list_dir",
         "write_file",
         "apply_patch",
