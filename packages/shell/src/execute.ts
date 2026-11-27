@@ -246,13 +246,21 @@ export function createShellRuntime(options: ShellRuntimeOptions): ShellRuntime {
     switch (op) {
       case "shell_run":
         return startCommand(record, ctx, jobs, spawnImpl, sessionScope);
-      case "shell_search_files":
+      case "shell_search_files": {
+        if (record.includeIgnored !== undefined && typeof record.includeIgnored !== "boolean") {
+          throw new ToolError("includeIgnored must be a boolean.", "invalid_argument");
+        }
         return searchFiles(
-          confineCwd(requiredString(record.cwd, "cwd", 4096), ctx),
+          requiredString(record.cwd, "cwd", 4096),
           requiredString(record.query, "query", 1024),
-          record.glob === undefined ? undefined : requiredString(record.glob, "glob", 256),
+          {
+            glob: record.glob === undefined ? undefined : requiredString(record.glob, "glob", 256),
+            includeIgnored: record.includeIgnored === true,
+          },
           ctx,
+          signal,
         );
+      }
       case "shell_git_diff":
       case "shell_git_log":
         return gitInspect(
