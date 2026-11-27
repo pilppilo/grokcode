@@ -243,3 +243,5 @@ Every tool takes `machine` except `list_machines`, which is required when more t
 | `kill_job` | Terminate a running command and its process tree on the selected machine. Destructive. |
 | `write_file` / `apply_patch` | Inside the roots. Unified diffs. Destructive. |
 | `git_commit_push` | Named paths and a branch allowlist. Push is refused before any commit when `git.push` is false. A push failure after a commit returns the commit SHA and the push error, with `isError` set, and says to retry only the push. Destructive. |
+
+With `search_files`, omit `cwd` to search the named project's root. Results report the requested directory, any filename glob, and the active exclusions. Set `includeIgnored: true` to include the default-skipped directories listed in the tool description. To search source maps, use a glob ending in `.map`. `resultsCapped` indicates omitted matches, `filesPartiallyScanned` indicates incomplete file reads, and `scanLimit` identifies an entry or byte budget that stopped traversal.

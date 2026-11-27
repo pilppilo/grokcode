@@ -2,6 +2,7 @@ import type { ShellOpName, ToolAnnotations } from "grokcode-shared";
 
 export const SHELL_SERVER_NAME = "grokcode-shell";
 export const SHELL_SERVER_VERSION = "0.1.0";
+export const SEARCH_IGNORED_DIRECTORIES = ["node_modules", "dist", "build", "target", "__pycache__"] as const;
 
 export const SHELL_INSTRUCTIONS = [
   "grokcode-shell runs commands and edits files on the owner's own PCs.",
@@ -303,18 +304,19 @@ const tools: ShellTool[] = [
   },
   {
     name: "search_files",
-    description: "Find literal text in regular files under cwd. Skips hidden and sensitive paths and symlinks. Requires the rg policy entry.",
+    description: `Find literal text under cwd, which defaults to the root of the named project. By default, skips ${SEARCH_IGNORED_DIRECTORIES.join(", ")} directories and *.map files. Hidden paths, sensitive paths, symlinks within the search, and binary files are excluded. Reports the search scope, exclusions, and limits reached. Requires the rg policy entry.`,
     op: "shell_search_files",
     annotations: readOnly,
     inputSchema: {
       type: "object",
       properties: {
         machine,
-        cwd: { type: "string", description: "Absolute directory inside the allowed roots." },
+        cwd: { type: "string", description: "Absolute directory inside the allowed roots, or a path relative to the named project. Required without a project." },
         query: { type: "string", description: "Case-sensitive literal text." },
-        glob: { type: "string", description: "Optional filename glob using * and ?, such as *.ts." },
+        glob: { type: "string", description: "Optional filename glob using * and ?, such as *.ts. Use a glob ending in .map to search source maps." },
+        includeIgnored: { type: "boolean", description: `Include ${SEARCH_IGNORED_DIRECTORIES.join(", ")} directories. Defaults to false.` },
       },
-      required: ["cwd", "query"],
+      required: ["query"],
       additionalProperties: false,
     },
   },
