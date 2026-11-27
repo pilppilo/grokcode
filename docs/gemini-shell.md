@@ -226,6 +226,8 @@ node packages/shell/dist/cli.js --policy ~/.config/grokcode/policy.json --name m
 
 ## Tools
 
+In `list_dir`, file entries report `size` in bytes and `lineCount`. Large files use a sample of up to 64 KiB and set `lineCountEstimated`. A field is `null` when the metadata is unavailable, as with line counts for binary files.
+
 Every tool takes `machine` except `list_machines`, which is required when more than one PC is online.
 
 | Tool | Notes |
